@@ -10,7 +10,7 @@
     "build": "npm run build -w @of/shared && npm run build -w @of/orderflow && npm run build -w @of/exchange && npm run build -w @of/api && npm run build -w @of/web",
     "dev:api": "npm run dev -w @of/api",
     "dev:web": "npm run dev -w @of/web",
-    "dev": "npm run build -w @of/shared && npm run build -w @of/orderflow && npm run build -w @of/exchange && concurrently -k -n api,web -c cyan,magenta \"npm run dev -w @of/api\" \"npm run dev -w @of/web\"",
+    "dev": "npm run build -w @of/shared && npm run build -w @of/orderflow && npm run build -w @of/exchange && concurrently -n api,web -c cyan,magenta --restart-tries 5 --restart-after 2000 \"npm run dev -w @of/api\" \"npm run dev -w @of/web\"",
     "test": "npm run test -w @of/orderflow && npm run test -w @of/api",
     "start": "npm run start -w @of/api"
   },

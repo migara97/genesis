@@ -148,7 +148,13 @@ export function Markets({ selected, onSelect }: Props) {
             ))}
           </tbody>
         </table>
-        {!items.length && <p className="muted">Synchronizing markets from the connected exchange…</p>}
+        {!items.length && (
+          <p className="muted">
+            {quotes.length
+              ? "No pairs match this search."
+              : "Synchronizing markets from the connected exchange…"}
+          </p>
+        )}
         {error && <p className="disclaimer">{error}</p>}
       </div>
       <p className="disclaimer">
