@@ -147,12 +147,19 @@ app.register(async (instance) => {
   });
 });
 
+marketHub.on("error", (err: Error) => {
+  app.log.error({ err }, "market data error (API stays up; retrying)");
+});
+
 try {
-  await marketHub.start(config.symbols);
+  // Always bind HTTP/WS first so the UI proxy does not get ECONNREFUSED
+  // if the exchange is temporarily unreachable.
+  marketHub.bootstrapSymbols(config.symbols);
   await app.listen({ port: config.port, host: config.host });
   app.log.info(
-    `Order Flow API listening on ${config.host}:${config.port} mode=${executionService.getMode()} symbols=${config.symbols.join(",")}`,
+    `Order Flow API listening on ${config.host}:${config.port} mode=${executionService.getMode()} symbols=${config.symbols.join(",")} exchange=${config.exchange}`,
   );
+  void marketHub.start(config.symbols);
 } catch (err) {
   app.log.error(err);
   process.exit(1);

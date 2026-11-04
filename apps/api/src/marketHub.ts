@@ -57,43 +57,95 @@ export class MarketHub extends EventEmitter {
   private adapter: ExchangeMarketDataAdapter = createMarketAdapter();
   private states = new Map<string, SymbolState>();
   private started = false;
+  private connecting = false;
 
-  async start(symbols = config.symbols): Promise<void> {
-    if (this.started) return;
-    this.started = true;
+  /** Prepare empty symbol slots so the API can serve before exchange is up. */
+  bootstrapSymbols(symbols = config.symbols): void {
     const sessionStart = Date.now();
-
     for (const symbol of symbols) {
-      const candles = await this.adapter.fetchKlines(symbol, "15m", 200);
-      const prevDay = await this.adapter.fetchKlines(symbol, "1d", 2);
-      const prev = prevDay[0];
+      if (this.states.has(symbol)) continue;
       this.states.set(symbol, {
         trades: [],
         sessionTrades: [],
         cvd: createCvdState(symbol, sessionStart),
         footprintBuffer: [],
         footprintOpen: Date.now(),
-        candles,
-        lastPrice: candles[candles.length - 1]?.close ?? 0,
-        structure: analyzeMarketStructure(
-          symbol,
-          candles,
-          3,
-          prev?.high,
-          prev?.low,
-        ),
-        health: this.adapter.getHealth(),
+        candles: [],
+        lastPrice: 0,
+        health: {
+          exchange: this.adapter.id,
+          connected: false,
+          reconnectAttempts: 0,
+          symbols,
+          lastError: "Connecting to exchange…",
+        },
       });
-      this.recomputeProfile(symbol);
-      this.recomputeSignal(symbol);
     }
+  }
 
-    await this.adapter.connect(symbols, {
-      onTrade: (t) => this.onTrade(t),
-      onBook: (b) => this.onBook(b),
-      onHealth: (h) => this.onHealth(h),
-      onError: (e) => this.emit("error", e),
-    });
+  /**
+   * Connect to the exchange with retries. Safe to call after HTTP server is up.
+   * Does not throw after exhausting a single attempt — schedules retries instead.
+   */
+  async start(symbols = config.symbols): Promise<void> {
+    this.bootstrapSymbols(symbols);
+    if (this.started || this.connecting) return;
+    this.connecting = true;
+
+    try {
+      for (const symbol of symbols) {
+        try {
+          const candles = await this.adapter.fetchKlines(symbol, "15m", 200);
+          const prevDay = await this.adapter.fetchKlines(symbol, "1d", 2);
+          const prev = prevDay[0];
+          const state = this.states.get(symbol)!;
+          state.candles = candles;
+          state.lastPrice = candles[candles.length - 1]?.close ?? 0;
+          state.structure = analyzeMarketStructure(
+            symbol,
+            candles,
+            3,
+            prev?.high,
+            prev?.low,
+          );
+          state.health = {
+            ...state.health,
+            lastError: undefined,
+          };
+          this.recomputeProfile(symbol);
+          this.recomputeSignal(symbol);
+        } catch (err) {
+          const state = this.states.get(symbol);
+          if (state) {
+            state.health = {
+              ...state.health,
+              connected: false,
+              lastError: (err as Error).message,
+            };
+          }
+          this.emit("error", err);
+          throw err;
+        }
+      }
+
+      await this.adapter.connect(symbols, {
+        onTrade: (t) => this.onTrade(t),
+        onBook: (b) => this.onBook(b),
+        onHealth: (h) => this.onHealth(h),
+        onError: (e) => this.emit("error", e),
+      });
+      this.started = true;
+    } catch (err) {
+      this.emit("error", err);
+      // Retry in background so a transient TLS/network blip does not kill the API.
+      setTimeout(() => {
+        this.connecting = false;
+        void this.start(symbols);
+      }, 5_000);
+      return;
+    } finally {
+      if (this.started) this.connecting = false;
+    }
   }
 
   getSnapshot(symbol: string): MarketSnapshot | null {
