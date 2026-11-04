@@ -1,0 +1,24 @@
+{
+  "name": "order-flow-platform",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build -w @of/shared && npm run build -w @of/orderflow && npm run build -w @of/exchange && npm run build -w @of/api && npm run build -w @of/web",
+    "dev:api": "npm run dev -w @of/api",
+    "dev:web": "npm run dev -w @of/web",
+    "dev": "npm run build -w @of/shared && npm run build -w @of/orderflow && npm run build -w @of/exchange && concurrently -k -n api,web -c cyan,magenta \"npm run dev -w @of/api\" \"npm run dev -w @of/web\"",
+    "test": "npm run test -w @of/orderflow && npm run test -w @of/api",
+    "start": "npm run start -w @of/api"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "typescript": "^5.8.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
