@@ -23,22 +23,61 @@ packages/orderflow Pure calculation engines
 packages/exchange  Exchange adapters (Binance first)
 ```
 
-## Quick start
+## Prerequisites
+
+- Node.js **20+** (LTS recommended): https://nodejs.org
+- Git
+- Internet access (live OKX/Binance market data)
+- Windows: if `better-sqlite3` fails to install, install [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) (Desktop development with C++)
+
+## Quick start (Windows PowerShell)
+
+```powershell
+cd "D:\My Project\genesis"
+git fetch origin
+git checkout development
+git pull origin development
+
+npm install
+Copy-Item apps\api\.env.example apps\api\.env
+npm run build -w @of/shared -w @of/orderflow -w @of/exchange
+npm run dev
+```
+
+## Quick start (macOS / Linux)
 
 ```bash
+cd /path/to/genesis
+git checkout development
+git pull origin development
 npm install
 cp apps/api/.env.example apps/api/.env
 npm run build -w @of/shared -w @of/orderflow -w @of/exchange
 npm run dev
 ```
 
-- API: `http://localhost:8080`
-- UI: `http://localhost:5173`
-- Health: `GET /health`
-- Live snapshots WS: `ws://localhost:8080/ws`
+Then open:
 
-Default exchange: `okx` with `BTC-USDT-SWAP` (override with `EXCHANGE` / `DEFAULT_SYMBOLS`).
+- UI: http://localhost:5173
+- API: http://localhost:8080
+- Health: http://localhost:8080/health
+- Live WS: ws://localhost:8080/ws
+
+Default exchange: `okx` with `BTC-USDT-SWAP` (override with `EXCHANGE` / `DEFAULT_SYMBOLS` in `apps/api/.env`).
 Binance public endpoints return HTTP 451 in some regions; use `EXCHANGE=binance` where accessible.
+
+### Run API and UI in separate terminals (optional)
+
+```powershell
+# Terminal 1
+cd "D:\My Project\genesis"
+npm run build -w @of/shared -w @of/orderflow -w @of/exchange
+npm run dev:api
+
+# Terminal 2
+cd "D:\My Project\genesis"
+npm run dev:web
+```
 
 ## Execution modes
 
