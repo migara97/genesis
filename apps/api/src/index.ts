@@ -8,6 +8,14 @@ import { executionService } from "./execution.js";
 import { marketHub } from "./marketHub.js";
 import { backtestFromCandles } from "./backtest.js";
 import { BinanceFuturesMarketDataAdapter, OkxSwapMarketDataAdapter } from "@of/exchange";
+import { startMarketSync } from "./markets/sync.js";
+import {
+  getInstrument,
+  listMarkets,
+  listQuotes,
+  replaceCandleCache,
+  setFavorite,
+} from "./markets/store.js";
 
 const app = Fastify({
   logger: { level: config.logLevel },
@@ -19,7 +27,8 @@ await app.register(websocket);
 app.get("/health", async () => ({
   ok: true,
   mode: executionService.getMode(),
-  symbols: config.symbols,
+  symbols: marketHub.streamingSymbols(),
+  configuredSymbols: config.symbols,
   exchange: config.exchange,
   dataPolicy:
     "Live public market data via modular exchange adapters (OKX default, Binance optional). Aggressor flags are exchange-reported when provided. Institutional identity is never claimed.",
@@ -97,6 +106,59 @@ app.delete("/api/orders/:id", async (req, reply) => {
   return order;
 });
 
+app.get("/api/markets", async (req) => {
+  const query = req.query as Record<string, string | undefined>;
+  const result = listMarkets({
+    exchange: config.exchange,
+    q: query.q,
+    quote: query.quote,
+    status: query.status,
+    sort: query.sort,
+    favorites: query.favorites === "1" || query.favorites === "true",
+    limit: query.limit ? Number(query.limit) : undefined,
+    offset: query.offset ? Number(query.offset) : undefined,
+  });
+  return {
+    exchange: config.exchange,
+    streaming: marketHub.streamingSymbols(),
+    quotes: listQuotes(config.exchange),
+    total: result.total,
+    items: result.items,
+    sources: {
+      ticker: "exchange_reported",
+      marketCap: "unavailable",
+      orderFlow: "calculated_for_selected_symbol",
+    },
+  };
+});
+
+app.post("/api/watchlist", async (req, reply) => {
+  const body = z
+    .object({
+      symbol: z.string().min(3).max(40),
+      favorite: z.boolean(),
+    })
+    .parse(req.body);
+  const instrument = getInstrument(config.exchange, body.symbol);
+  if (!instrument) return reply.code(404).send({ error: "Unknown symbol" });
+  setFavorite(config.exchange, instrument.symbol, body.favorite);
+  return { symbol: instrument.symbol, favorite: body.favorite };
+});
+
+app.get("/api/markets/:symbol/candles", async (req, reply) => {
+  const symbol = (req.params as { symbol: string }).symbol.toUpperCase();
+  const interval = ((req.query as { interval?: string }).interval ?? "15m").toLowerCase();
+  const allowed = new Set(["1m", "3m", "5m", "15m", "1h", "4h", "1d"]);
+  if (!allowed.has(interval)) return reply.code(400).send({ error: "Unsupported interval" });
+  const adapter =
+    config.exchange === "binance"
+      ? new BinanceFuturesMarketDataAdapter()
+      : new OkxSwapMarketDataAdapter();
+  const candles = await adapter.fetchKlines(symbol, interval, 200);
+  replaceCandleCache(config.exchange, symbol, interval, candles);
+  return { symbol, interval, source: "exchange_reported", candles };
+});
+
 app.get("/api/backtest/:symbol", async (req) => {
   const symbol = (req.params as { symbol: string }).symbol.toUpperCase();
   const adapter =
@@ -115,14 +177,15 @@ app.get("/api/backtest/:symbol", async (req) => {
 app.register(async (instance) => {
   instance.get("/ws", { websocket: true }, (socket) => {
     const send = (type: string, payload: unknown) => {
-      if (socket.readyState === 1) {
-        socket.send(JSON.stringify({ type, payload, ts: Date.now() }));
-      }
+      if (socket.readyState !== 1) return;
+      // Drop updates when the browser is behind so the API cannot buffer itself to OOM.
+      if (socket.bufferedAmount > 1_000_000) return;
+      socket.send(JSON.stringify({ type, payload, ts: Date.now() }));
     };
 
     send("hello", {
       mode: executionService.getMode(),
-      symbols: config.symbols,
+      symbols: marketHub.streamingSymbols(),
       snapshots: marketHub.listSnapshots(),
     });
 
@@ -133,8 +196,22 @@ app.register(async (instance) => {
 
     socket.on("message", (raw) => {
       try {
-        const msg = JSON.parse(raw.toString()) as { type?: string };
+        const msg = JSON.parse(raw.toString()) as { type?: string; symbol?: string };
         if (msg.type === "ping") send("pong", {});
+        if (msg.type === "subscribe" && msg.symbol) {
+          const symbol = msg.symbol.toUpperCase();
+          if (!/^[A-Z0-9._-]{3,40}$/.test(symbol)) {
+            send("error", { error: "Invalid symbol" });
+            return;
+          }
+          const instrument = getInstrument(config.exchange, symbol);
+          if (instrument?.status === "delisted") {
+            send("error", { error: "Symbol is delisted on this exchange" });
+            return;
+          }
+          if (instrument) marketHub.setTickSize(symbol, instrument.tickSize);
+          void marketHub.focus(symbol);
+        }
       } catch {
         // ignore malformed client messages
       }
@@ -154,12 +231,14 @@ marketHub.on("error", (err: Error) => {
 try {
   // Always bind HTTP/WS first so the UI proxy does not get ECONNREFUSED
   // if the exchange is temporarily unreachable.
-  marketHub.bootstrapSymbols(config.symbols);
+  const initialSymbol = config.symbols[0] ?? "BTC-USDT-SWAP";
+  marketHub.bootstrapSymbols([initialSymbol]);
   await app.listen({ port: config.port, host: config.host });
   app.log.info(
-    `Order Flow API listening on ${config.host}:${config.port} mode=${executionService.getMode()} symbols=${config.symbols.join(",")} exchange=${config.exchange}`,
+    `Order Flow API listening on ${config.host}:${config.port} mode=${executionService.getMode()} streaming=${initialSymbol} exchange=${config.exchange}`,
   );
-  void marketHub.start(config.symbols);
+  void marketHub.focus(initialSymbol);
+  startMarketSync(app.log);
 } catch (err) {
   app.log.error(err);
   process.exit(1);

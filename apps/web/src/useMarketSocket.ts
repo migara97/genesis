@@ -12,6 +12,8 @@ export function useMarketSocket() {
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const retryRef = useRef(0);
+  const wsRef = useRef<WebSocket | null>(null);
+  const symbolRef = useRef<string | null>(null);
 
   useEffect(() => {
     let ws: WebSocket | null = null;
@@ -20,10 +22,14 @@ export function useMarketSocket() {
 
     const connect = () => {
       ws = new WebSocket(wsUrl());
+      wsRef.current = ws;
       ws.onopen = () => {
         setConnected(true);
         setError(null);
         retryRef.current = 0;
+        if (symbolRef.current) {
+          ws?.send(JSON.stringify({ type: "subscribe", symbol: symbolRef.current }));
+        }
       };
       ws.onclose = () => {
         setConnected(false);
@@ -48,10 +54,13 @@ export function useMarketSocket() {
             setSnapshots(map);
           } else if (msg.type === "snapshot") {
             const snap = msg.payload as MarketSnapshot;
-            setSnapshots((prev) => ({ ...prev, [snap.symbol]: snap }));
+            setSnapshots({ [snap.symbol]: snap });
             setHealth(snap.health);
           } else if (msg.type === "health") {
             setHealth(msg.payload as ConnectionHealth);
+          } else if (msg.type === "error") {
+            const payload = msg.payload as { error?: string };
+            setError(payload.error ?? "Market subscription failed");
           }
         } catch {
           // ignore
@@ -67,5 +76,12 @@ export function useMarketSocket() {
     };
   }, []);
 
-  return { snapshots, health, connected, error };
+  const subscribe = (symbol: string) => {
+    symbolRef.current = symbol;
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: "subscribe", symbol }));
+    }
+  };
+
+  return { snapshots, health, connected, error, subscribe };
 }

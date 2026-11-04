@@ -64,6 +64,8 @@ Then open:
 - Live WS: ws://localhost:8080/ws
 
 Default exchange: `okx` with `BTC-USDT-SWAP` (override with `EXCHANGE` / `DEFAULT_SYMBOLS` in `apps/api/.env`).
+
+`DEFAULT_SYMBOLS` chooses the pair that streams order flow on startup. The market list itself is discovered from that exchange (OKX perpetual swaps, or Binance USD-M when `EXCHANGE=binance`). See [docs/MARKETS.md](docs/MARKETS.md).
 Binance public endpoints return HTTP 451 in some regions; use `EXCHANGE=binance` where accessible.
 
 ### Run API and UI in separate terminals (optional)

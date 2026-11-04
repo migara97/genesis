@@ -41,6 +41,7 @@ export class BinanceFuturesMarketDataAdapter implements ExchangeMarketDataAdapte
   private shouldRun = false;
   private reconnectTimer: NodeJS.Timeout | null = null;
   private books = new Map<string, LocalBook>();
+  private connId = 0;
   private health: ConnectionHealth = {
     exchange: this.id,
     connected: false,
@@ -56,6 +57,7 @@ export class BinanceFuturesMarketDataAdapter implements ExchangeMarketDataAdapte
   }
 
   async disconnect(): Promise<void> {
+    this.connId += 1;
     this.shouldRun = false;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.ws?.close();
@@ -106,6 +108,7 @@ export class BinanceFuturesMarketDataAdapter implements ExchangeMarketDataAdapte
   }
 
   private async openSocket(): Promise<void> {
+    const connId = ++this.connId;
     const streams = this.symbols
       .flatMap((s) => {
         const id = s.toLowerCase();
@@ -119,6 +122,10 @@ export class BinanceFuturesMarketDataAdapter implements ExchangeMarketDataAdapte
       let settled = false;
 
       ws.on("open", () => {
+        if (connId !== this.connId) {
+          ws.close();
+          return;
+        }
         this.health = {
           ...this.health,
           connected: true,
@@ -135,9 +142,12 @@ export class BinanceFuturesMarketDataAdapter implements ExchangeMarketDataAdapte
         }
       });
 
-      ws.on("message", (data) => this.onMessage(data.toString()));
+      ws.on("message", (data) => {
+        if (connId === this.connId) this.onMessage(data.toString());
+      });
 
       ws.on("error", (err) => {
+        if (connId !== this.connId) return;
         this.health = { ...this.health, lastError: err.message };
         this.emitHealth();
         this.handlers?.onError?.(err);
@@ -148,6 +158,7 @@ export class BinanceFuturesMarketDataAdapter implements ExchangeMarketDataAdapte
       });
 
       ws.on("close", () => {
+        if (connId !== this.connId) return;
         this.health = { ...this.health, connected: false };
         this.emitHealth();
         if (this.shouldRun) this.scheduleReconnect();

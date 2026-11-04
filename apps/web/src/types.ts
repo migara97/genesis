@@ -35,9 +35,20 @@ export interface FootprintCell {
   bidVolume: number;
   askVolume: number;
   delta: number;
+  trades?: number;
+}
+
+export interface FootprintImbalance {
+  price: number;
+  side: string;
+  ratio?: number;
+  stacked: boolean;
+  diagonal?: boolean;
 }
 
 export interface FootprintBar {
+  openTime?: number;
+  closeTime?: number;
   open: number;
   high: number;
   low: number;
@@ -45,7 +56,7 @@ export interface FootprintBar {
   cells: FootprintCell[];
   totalDelta: number;
   totalVolume: number;
-  imbalances: { price: number; side: string; stacked: boolean }[];
+  imbalances: FootprintImbalance[];
   absorption: boolean;
   exhaustion: boolean;
   unfinishedAuction: boolean;
@@ -53,6 +64,7 @@ export interface FootprintBar {
 }
 
 export interface CvdState {
+  sessionStart?: number;
   cvd: number;
   divergence: string;
   exhaustion: boolean;
@@ -60,29 +72,47 @@ export interface CvdState {
   evidence: { kind: string; note: string }[];
 }
 
+export interface VolumeLevel {
+  price: number;
+  volume: number;
+  buyVolume?: number;
+  sellVolume?: number;
+}
+
 export interface VolumeProfile {
+  from?: number;
+  to?: number;
   poc: number;
   vah: number;
   val: number;
   hvn: number[];
   lvn: number[];
-  levels: { price: number; volume: number }[];
+  levels: VolumeLevel[];
   totalVolume: number;
+}
+
+export interface SwingPoint {
+  price: number;
+  timestamp: number;
+  type: string;
+  kind: string;
 }
 
 export interface MarketStructureState {
   trend: string;
+  swings?: SwingPoint[];
   support: number[];
   resistance: number[];
   liquidityPools: { side: string; price: number; label: string }[];
-  lastBos?: { direction: string; price: number };
-  lastChoch?: { direction: string; price: number };
+  lastBos?: { direction: string; price: number; timestamp?: number };
+  lastChoch?: { direction: string; price: number; timestamp?: number };
   previousSessionHigh?: number;
   previousSessionLow?: number;
   evidence: { kind: string; note: string }[];
 }
 
 export interface TradingSignal {
+  timestamp?: number;
   direction: SignalDirection;
   entry?: number;
   stopLoss?: number;
@@ -147,6 +177,32 @@ export interface OrderRecord {
   fees: number;
   rejectReason?: string;
   createdAt: number;
+}
+
+export interface MarketListing {
+  symbol: string;
+  baseAsset: string;
+  quoteAsset: string;
+  status: "live" | "suspended" | "delisted";
+  contractType: string;
+  lastPrice: number | null;
+  change24h: number | null;
+  changePct24h: number | null;
+  volume24h: number | null;
+  high24h: number | null;
+  low24h: number | null;
+  bid: number | null;
+  ask: number | null;
+  favorite: boolean;
+}
+
+export interface Candle {
+  openTime: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
 }
 
 export interface RiskConfig {

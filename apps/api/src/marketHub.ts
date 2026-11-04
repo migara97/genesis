@@ -58,6 +58,11 @@ export class MarketHub extends EventEmitter {
   private states = new Map<string, SymbolState>();
   private started = false;
   private connecting = false;
+  private generation = 0;
+  private retryTimer: NodeJS.Timeout | null = null;
+  private tickSizes = new Map<string, number>();
+  /** Coalesce high-frequency trade/book updates so each symbol publishes at most ~5 Hz. */
+  private snapshotTimers = new Map<string, NodeJS.Timeout>();
 
   /** Prepare empty symbol slots so the API can serve before exchange is up. */
   bootstrapSymbols(symbols = config.symbols): void {
@@ -83,17 +88,59 @@ export class MarketHub extends EventEmitter {
     }
   }
 
+  streamingSymbols(): string[] {
+    return [...this.states.keys()];
+  }
+
+  setTickSize(symbol: string, tickSize: number): void {
+    if (tickSize > 0) this.tickSizes.set(symbol.toUpperCase(), tickSize);
+  }
+
+  /**
+   * Stream order-flow for one symbol. Other catalog rows stay on the ticker feed.
+   */
+  async focus(symbol: string): Promise<void> {
+    const normalized = symbol.trim().toUpperCase();
+    if (!normalized) return;
+    const gen = ++this.generation;
+    if (this.retryTimer) {
+      clearTimeout(this.retryTimer);
+      this.retryTimer = null;
+    }
+    this.started = false;
+    this.connecting = false;
+    try {
+      await this.adapter.disconnect();
+    } catch {
+      // The next connect replaces the socket.
+    }
+    if (gen !== this.generation) return;
+    for (const key of [...this.states.keys()]) {
+      if (key !== normalized) this.states.delete(key);
+    }
+    for (const key of [...this.snapshotTimers.keys()]) {
+      if (key !== normalized) {
+        const timer = this.snapshotTimers.get(key);
+        if (timer) clearTimeout(timer);
+        this.snapshotTimers.delete(key);
+      }
+    }
+    await this.start([normalized], gen);
+  }
+
   /**
    * Connect to the exchange with retries. Safe to call after HTTP server is up.
    * Does not throw after exhausting a single attempt — schedules retries instead.
    */
-  async start(symbols = config.symbols): Promise<void> {
+  async start(symbols = config.symbols, gen = this.generation): Promise<void> {
+    if (gen !== this.generation) return;
     this.bootstrapSymbols(symbols);
     if (this.started || this.connecting) return;
     this.connecting = true;
 
     try {
       for (const symbol of symbols) {
+        if (gen !== this.generation) return;
         try {
           const candles = await this.adapter.fetchKlines(symbol, "15m", 200);
           const prevDay = await this.adapter.fetchKlines(symbol, "1d", 2);
@@ -128,19 +175,23 @@ export class MarketHub extends EventEmitter {
         }
       }
 
+      if (gen !== this.generation) return;
       await this.adapter.connect(symbols, {
         onTrade: (t) => this.onTrade(t),
         onBook: (b) => this.onBook(b),
         onHealth: (h) => this.onHealth(h),
         onError: (e) => this.emit("error", e),
       });
+      if (gen !== this.generation) return;
       this.started = true;
     } catch (err) {
+      if (gen !== this.generation) return;
       this.emit("error", err);
       // Retry in background so a transient TLS/network blip does not kill the API.
-      setTimeout(() => {
+      this.retryTimer = setTimeout(() => {
+        this.retryTimer = null;
         this.connecting = false;
-        void this.start(symbols);
+        void this.start(symbols, gen);
       }, 5_000);
       return;
     } finally {
@@ -194,7 +245,7 @@ export class MarketHub extends EventEmitter {
         state.footprintBuffer,
         state.footprintOpen,
         now,
-        { tickSize: config.tickSizeFor(trade.symbol) },
+        { tickSize: this.tickSize(trade.symbol) },
       );
       if (bar) state.footprint = bar;
       state.footprintBuffer = [];
@@ -205,7 +256,7 @@ export class MarketHub extends EventEmitter {
     }
 
     this.recomputeSignal(trade.symbol);
-    this.emit("snapshot", this.getSnapshot(trade.symbol));
+    this.publish(trade.symbol);
   }
 
   private onBook(book: OrderBookSnapshot): void {
@@ -215,7 +266,7 @@ export class MarketHub extends EventEmitter {
     state.dom = computeDomMetrics(book);
     if (state.dom.mid) state.lastPrice = state.dom.mid;
     this.recomputeSignal(book.symbol);
-    this.emit("snapshot", this.getSnapshot(book.symbol));
+    this.publish(book.symbol);
   }
 
   private onHealth(health: ConnectionHealth): void {
@@ -225,11 +276,27 @@ export class MarketHub extends EventEmitter {
     this.emit("health", health);
   }
 
+  private publish(symbol: string): void {
+    if (this.snapshotTimers.has(symbol)) return;
+    this.snapshotTimers.set(
+      symbol,
+      setTimeout(() => {
+        this.snapshotTimers.delete(symbol);
+        const snap = this.getSnapshot(symbol);
+        if (snap) this.emit("snapshot", snap);
+      }, 200),
+    );
+  }
+
+  private tickSize(symbol: string): number {
+    return this.tickSizes.get(symbol.toUpperCase()) ?? config.tickSizeFor(symbol);
+  }
+
   private recomputeProfile(symbol: string): void {
     const state = this.states.get(symbol);
     if (!state) return;
     state.volumeProfile =
-      buildVolumeProfile(symbol, state.sessionTrades, config.tickSizeFor(symbol)) ??
+      buildVolumeProfile(symbol, state.sessionTrades, this.tickSize(symbol)) ??
       undefined;
   }
 

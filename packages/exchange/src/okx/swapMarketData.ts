@@ -19,6 +19,7 @@ export class OkxSwapMarketDataAdapter implements ExchangeMarketDataAdapter {
   private reconnectTimer: NodeJS.Timeout | null = null;
   private pingTimer: NodeJS.Timeout | null = null;
   private books = new Map<string, LocalBook>();
+  private connId = 0;
   private health: ConnectionHealth = {
     exchange: this.id,
     connected: false,
@@ -34,6 +35,7 @@ export class OkxSwapMarketDataAdapter implements ExchangeMarketDataAdapter {
   }
 
   async disconnect(): Promise<void> {
+    this.connId += 1;
     this.shouldRun = false;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     if (this.pingTimer) clearInterval(this.pingTimer);
@@ -95,12 +97,17 @@ export class OkxSwapMarketDataAdapter implements ExchangeMarketDataAdapter {
   }
 
   private async openSocket(): Promise<void> {
+    const connId = ++this.connId;
     await new Promise<void>((resolve, reject) => {
       const ws = new WebSocket(WS_URL);
       this.ws = ws;
       let settled = false;
 
       ws.on("open", () => {
+        if (connId !== this.connId) {
+          ws.close();
+          return;
+        }
         const args = this.symbols.flatMap((instId) => [
           { channel: "trades", instId },
           { channel: "books5", instId },
@@ -125,8 +132,11 @@ export class OkxSwapMarketDataAdapter implements ExchangeMarketDataAdapter {
         }
       });
 
-      ws.on("message", (data) => this.onMessage(data.toString()));
+      ws.on("message", (data) => {
+        if (connId === this.connId) this.onMessage(data.toString());
+      });
       ws.on("error", (err) => {
+        if (connId !== this.connId) return;
         this.health = { ...this.health, lastError: err.message };
         this.emitHealth();
         this.handlers?.onError?.(err);
@@ -136,6 +146,7 @@ export class OkxSwapMarketDataAdapter implements ExchangeMarketDataAdapter {
         }
       });
       ws.on("close", () => {
+        if (connId !== this.connId) return;
         if (this.pingTimer) clearInterval(this.pingTimer);
         this.health = { ...this.health, connected: false };
         this.emitHealth();

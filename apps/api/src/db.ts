@@ -1,6 +1,7 @@
 import Database from "better-sqlite3";
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const dataDir = path.resolve(process.cwd(), "data");
 fs.mkdirSync(dataDir, { recursive: true });
@@ -25,6 +26,17 @@ CREATE TABLE IF NOT EXISTS meta (
   value TEXT NOT NULL
 );
 `);
+
+const schemaCandidates = [
+  path.join(path.dirname(fileURLToPath(import.meta.url)), "schema.sql"),
+  path.resolve(process.cwd(), "src/schema.sql"),
+  path.resolve(process.cwd(), "apps/api/src/schema.sql"),
+];
+const schemaPath = schemaCandidates.find((candidate) => fs.existsSync(candidate));
+if (!schemaPath) {
+  throw new Error(`Market schema not found. Looked in ${schemaCandidates.join(", ")}`);
+}
+db.exec(fs.readFileSync(schemaPath, "utf8"));
 
 export function saveOrder(order: unknown): void {
   const id = (order as { id: string }).id;

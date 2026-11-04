@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import {
   emergencyShutdown,
   fetchMode,
@@ -10,18 +10,27 @@ import {
   updateRisk,
 } from "./api";
 import type {
+  CvdState,
   ExecutionMode,
+  FootprintBar,
   MarketSnapshot,
+  MarketStructureState,
   OrderRecord,
   Position,
   RiskConfig,
+  TradingSignal,
+  VolumeProfile,
 } from "./types";
+import { CandleChart } from "./CandleChart";
+import { DepthChart } from "./DepthChart";
+import { Markets } from "./Markets";
 import { useMarketSocket } from "./useMarketSocket";
 
 export default function App() {
-  const { snapshots, health, connected, error } = useMarketSocket();
+  const { snapshots, health, connected, error, subscribe } = useMarketSocket();
   const symbols = Object.keys(snapshots);
-  const [symbol, setSymbol] = useState("BTCUSDT");
+  const [symbol, setSymbol] = useState("");
+  const [pinned, setPinned] = useState(false);
   const [mode, setModeState] = useState<ExecutionMode>("PAPER");
   const [risk, setRisk] = useState<RiskConfig | null>(null);
   const [positions, setPositions] = useState<Position[]>([]);
@@ -30,11 +39,18 @@ export default function App() {
   const [stop, setStop] = useState("");
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
 
-  const snap: MarketSnapshot | undefined = snapshots[symbol] ?? snapshots[symbols[0] ?? ""];
+  const snap: MarketSnapshot | undefined =
+    snapshots[symbol] ?? (!pinned ? snapshots[symbols[0] ?? ""] : undefined);
 
   useEffect(() => {
-    if (!symbols.includes(symbol) && symbols[0]) setSymbol(symbols[0]);
-  }, [symbols, symbol]);
+    if (!pinned && !symbol && symbols[0]) setSymbol(symbols[0]);
+  }, [pinned, symbol, symbols]);
+
+  const selectSymbol = (next: string) => {
+    setPinned(true);
+    setSymbol(next);
+    subscribe(next);
+  };
 
   useEffect(() => {
     void (async () => {
@@ -91,8 +107,6 @@ export default function App() {
     }
   };
 
-  const cvdPath = useMemo(() => buildCvdPath(snap?.cvd?.points ?? []), [snap?.cvd?.points]);
-
   return (
     <div className="app">
       <header className="topbar">
@@ -105,13 +119,7 @@ export default function App() {
           {health?.connected ? "live" : "down"}
         </span>
         <span className="pill warn">Default: PAPER</span>
-        <select value={symbol} onChange={(e) => setSymbol(e.target.value)}>
-          {(symbols.length ? symbols : [symbol]).map((s) => (
-            <option key={s} value={s}>
-              {s}
-            </option>
-          ))}
-        </select>
+        <span className="pill">{symbol || "select a market"}</span>
         <span className="price">{fmt(snap?.lastPrice)}</span>
         <div className="spacer" />
         <select value={mode} onChange={(e) => void onModeChange(e.target.value as ExecutionMode)}>
@@ -123,6 +131,8 @@ export default function App() {
           Kill Switch
         </button>
       </header>
+
+      <Markets selected={symbol} onSelect={selectSymbol} />
 
       <main className="layout">
         <section className="panel" style={{ gridRow: "1 / 3" }}>
@@ -158,115 +168,96 @@ export default function App() {
                 ))}
               </div>
             </div>
+            <DepthChart bids={snap?.book?.bids ?? []} asks={snap?.book?.asks ?? []} />
             <p className="disclaimer" style={{ marginTop: 8 }}>
-              Visible L2 only. Large size ≠ institutional identity.
+              Visible L2 only. Depth is calculated from the exchange book. Large size ≠ institutional identity.
             </p>
           </div>
         </section>
 
-        <section className="panel">
+        <section className="panel of-fill">
           <h3>Footprint (session bar)</h3>
-          <div className="panel-body footprint">
-            {!snap?.footprint ? (
-              <div className="muted">Aggregating first footprint interval…</div>
-            ) : (
-              <>
-                <div className="kv" style={{ marginBottom: 8 }}>
-                  <span className="muted">Delta</span>
-                  <span>{fmtQty(snap.footprint.totalDelta)}</span>
-                  <span className="muted">Volume</span>
-                  <span>{fmtQty(snap.footprint.totalVolume)}</span>
-                  <span className="muted">Absorption</span>
-                  <span>{snap.footprint.absorption ? "yes*" : "no"}</span>
-                  <span className="muted">Exhaustion</span>
-                  <span>{snap.footprint.exhaustion ? "yes*" : "no"}</span>
-                </div>
-                {snap.footprint.cells.slice(0, 24).map((c) => {
-                  const tot = c.bidVolume + c.askVolume || 1;
-                  return (
-                    <div className="fp-row" key={c.price}>
-                      <span className="sell">{fmtQty(c.bidVolume)}</span>
-                      <div className="bar">
-                        <span className="bid" style={{ width: `${(c.bidVolume / tot) * 50}%` }} />
-                        <span className="ask" style={{ width: `${(c.askVolume / tot) * 50}%` }} />
-                      </div>
-                      <span className="buy">{fmtQty(c.askVolume)}</span>
-                      <span>{fmt(c.price)}</span>
-                    </div>
-                  );
-                })}
-                <p className="disclaimer">* heuristic flags, not proven institutional activity</p>
-              </>
-            )}
+          <div className="panel-body">
+            <FootprintBoard bar={snap?.footprint} sessionCvd={snap?.cvd?.cvd} />
           </div>
         </section>
 
-        <section className="panel">
+        <section className="panel of-fill">
           <h3>Signal Engine</h3>
           <div className="panel-body">
-            <div className={`signal-${(snap?.signal?.direction ?? "WAIT").toLowerCase()}`}>
-              {snap?.signal?.direction ?? "WAIT"}
-            </div>
-            <div className="kv" style={{ marginTop: 8 }}>
-              <span className="muted">Confidence</span>
-              <span>{((snap?.signal?.confidence ?? 0) * 100).toFixed(0)}%</span>
-              <span className="muted">Entry</span>
-              <span>{fmt(snap?.signal?.entry)}</span>
-              <span className="muted">Stop</span>
-              <span>{fmt(snap?.signal?.stopLoss)}</span>
-              <span className="muted">TP</span>
-              <span>{(snap?.signal?.takeProfit ?? []).map(fmt).join(" / ") || "-"}</span>
-              <span className="muted">R:R</span>
-              <span>{snap?.signal?.riskReward ?? "-"}</span>
-            </div>
-            <div className="muted" style={{ marginTop: 8, fontSize: 12 }}>
-              Confirmations: {(snap?.signal?.confirmations ?? []).join(", ") || "none"}
-            </div>
-            <div style={{ marginTop: 8 }}>
-              <div className="muted">For</div>
-              <ul className="list">
-                {(snap?.signal?.reasonsFor ?? []).slice(0, 4).map((r) => (
-                  <li key={r}>{r}</li>
-                ))}
-              </ul>
-              <div className="muted">Against</div>
-              <ul className="list">
-                {(snap?.signal?.reasonsAgainst ?? []).slice(0, 4).map((r) => (
-                  <li key={r}>{r}</li>
-                ))}
-              </ul>
-            </div>
+            <SignalBoard signal={snap?.signal} symbol={snap?.symbol} cvd={snap?.cvd} footprint={snap?.footprint} structure={snap?.structure} />
           </div>
         </section>
 
         <section className="panel" style={{ gridRow: "1 / 3" }}>
           <h3>Execution / Risk</h3>
           <div className="panel-body">
-            <div className="form-row">
-              <input value={qty} onChange={(e) => setQty(e.target.value)} placeholder="qty" />
-              <input value={stop} onChange={(e) => setStop(e.target.value)} placeholder="stop" />
+            <div className="desk-block">
+              <div className="desk-kicker">Order ticket</div>
+              <div className="ticket">
+                <label className="field">
+                  <span>Quantity</span>
+                  <input value={qty} onChange={(e) => setQty(e.target.value)} placeholder="qty" />
+                </label>
+                <label className="field">
+                  <span>Stop loss</span>
+                  <input value={stop} onChange={(e) => setStop(e.target.value)} placeholder="stop" />
+                </label>
+              </div>
+              <div className="trade-actions">
+                <button className="success" onClick={() => void submit("BUY")}>
+                  Buy / Long
+                </button>
+                <button className="danger" onClick={() => void submit("SELL")}>
+                  Sell / Short
+                </button>
+              </div>
             </div>
-            <div className="form-row">
-              <button className="success" onClick={() => void submit("BUY")}>
-                Buy / Long
-              </button>
-              <button className="danger" onClick={() => void submit("SELL")}>
-                Sell / Short
-              </button>
-            </div>
-            {statusMsg && <div className="muted">{statusMsg}</div>}
+            {statusMsg && <div className="status-line">{statusMsg}</div>}
             {error && <div className="signal-short">{error}</div>}
-            <div className="kv" style={{ marginTop: 10 }}>
-              <span className="muted">Equity</span>
-              <span>{fmt(risk?.accountEquity)}</span>
-              <span className="muted">Risk %/trade</span>
-              <span>{risk?.riskPercentPerTrade}</span>
-              <span className="muted">Max daily loss %</span>
-              <span>{risk?.maxDailyLossPercent}</span>
-              <span className="muted">Emergency</span>
-              <span>{risk?.emergencyShutdown ? "ON" : "off"}</span>
+            <div className="desk-block">
+              <div className="desk-kicker">Signal plan</div>
+              <div className="metric-grid">
+                <div className="metric">
+                  <span>Entry</span>
+                  <strong>{fmt(snap?.signal?.entry)}</strong>
+                </div>
+                <div className="metric">
+                  <span>Stop</span>
+                  <strong className="sell">{fmt(snap?.signal?.stopLoss)}</strong>
+                </div>
+                <div className="metric">
+                  <span>Take profit</span>
+                  <strong className="buy">{(snap?.signal?.takeProfit ?? []).map(fmt).join(" / ") || "-"}</strong>
+                </div>
+                <div className="metric">
+                  <span>Risk / reward</span>
+                  <strong>{snap?.signal?.riskReward ?? "-"}</strong>
+                </div>
+              </div>
             </div>
-            <div className="form-row" style={{ marginTop: 8 }}>
+            <div className="desk-block">
+              <div className="desk-kicker">Account risk</div>
+              <div className="metric-grid">
+                <div className="metric">
+                  <span>Equity</span>
+                  <strong>{fmt(risk?.accountEquity)}</strong>
+                </div>
+                <div className="metric">
+                  <span>Risk / trade</span>
+                  <strong>{risk?.riskPercentPerTrade ?? "-"}%</strong>
+                </div>
+                <div className="metric">
+                  <span>Max daily loss</span>
+                  <strong>{risk?.maxDailyLossPercent ?? "-"}%</strong>
+                </div>
+                <div className="metric">
+                  <span>Emergency</span>
+                  <strong className={risk?.emergencyShutdown ? "sell" : "buy"}>
+                    {risk?.emergencyShutdown ? "ON" : "Off"}
+                  </strong>
+                </div>
+              </div>
               <button
                 onClick={() =>
                   void updateRisk({
@@ -286,60 +277,17 @@ export default function App() {
           </div>
         </section>
 
-        <section className="panel">
+        <section className="panel of-fill">
           <h3>CVD</h3>
           <div className="panel-body">
-            <div className="kv">
-              <span className="muted">Session CVD</span>
-              <span>{fmtQty(snap?.cvd?.cvd)}</span>
-              <span className="muted">Divergence</span>
-              <span>{snap?.cvd?.divergence ?? "-"}</span>
-              <span className="muted">Exhaustion</span>
-              <span>{snap?.cvd?.exhaustion ? "yes*" : "no"}</span>
-            </div>
-            <svg className="cvd-chart" viewBox="0 0 300 120" preserveAspectRatio="none">
-              <polyline
-                fill="none"
-                stroke="#3b82f6"
-                strokeWidth="2"
-                points={cvdPath}
-              />
-            </svg>
+            <CvdBoard cvd={snap?.cvd} symbol={symbol} />
           </div>
         </section>
 
-        <section className="panel">
+        <section className="panel of-fill">
           <h3>Volume Profile / Structure</h3>
           <div className="panel-body">
-            <div className="kv">
-              <span className="muted">POC</span>
-              <span>{fmt(snap?.volumeProfile?.poc)}</span>
-              <span className="muted">VAH / VAL</span>
-              <span>
-                {fmt(snap?.volumeProfile?.vah)} / {fmt(snap?.volumeProfile?.val)}
-              </span>
-              <span className="muted">Trend</span>
-              <span>{snap?.structure?.trend ?? "-"}</span>
-              <span className="muted">BOS</span>
-              <span>
-                {snap?.structure?.lastBos
-                  ? `${snap.structure.lastBos.direction} @ ${fmt(snap.structure.lastBos.price)}`
-                  : "-"}
-              </span>
-              <span className="muted">CHoCH</span>
-              <span>
-                {snap?.structure?.lastChoch
-                  ? `${snap.structure.lastChoch.direction} @ ${fmt(snap.structure.lastChoch.price)}`
-                  : "-"}
-              </span>
-            </div>
-            <div className="muted" style={{ marginTop: 8, fontSize: 12 }}>
-              Liquidity pools:{" "}
-              {(snap?.structure?.liquidityPools ?? [])
-                .slice(0, 4)
-                .map((p) => `${p.side} ${fmt(p.price)}`)
-                .join(" · ") || "-"}
-            </div>
+            <StructureBoard profile={snap?.volumeProfile} structure={snap?.structure} lastPrice={snap?.lastPrice} />
           </div>
         </section>
 
@@ -362,7 +310,7 @@ export default function App() {
           </div>
         </section>
 
-        <section className="panel" style={{ gridColumn: "1 / 3" }}>
+        <section className="panel" style={{ gridColumn: "1 / 3", gridRow: "4", minHeight: 220 }}>
           <h3>Open Positions</h3>
           <div className="panel-body">
             <table className="table">
@@ -394,7 +342,7 @@ export default function App() {
           </div>
         </section>
 
-        <section className="panel" style={{ gridColumn: "3 / 5" }}>
+        <section className="panel" style={{ gridColumn: "3 / 5", gridRow: "4", minHeight: 220 }}>
           <h3>Order History</h3>
           <div className="panel-body">
             <table className="table">
@@ -440,19 +388,545 @@ function fmtQty(n?: number): string {
   return n.toFixed(4);
 }
 
-function buildCvdPath(
-  points: { cvd: number }[],
-): string {
-  if (points.length < 2) return "0,60 300,60";
-  const vals = points.map((p) => p.cvd);
-  const min = Math.min(...vals);
-  const max = Math.max(...vals);
-  const span = max - min || 1;
-  return points
-    .map((p, i) => {
-      const x = (i / (points.length - 1)) * 300;
-      const y = 110 - ((p.cvd - min) / span) * 100;
-      return `${x},${y}`;
-    })
-    .join(" ");
+function FootprintBoard({ bar, sessionCvd }: { bar?: FootprintBar; sessionCvd?: number }) {
+  if (!bar) return <div className="muted">Aggregating first footprint interval…</div>;
+  const cells = [...bar.cells].sort((a, b) => b.price - a.price);
+  const imbalances = bar.imbalances ?? [];
+  const maxTotal = Math.max(...cells.map((cell) => cell.bidVolume + cell.askVolume), 0);
+  const maxAbsDelta = Math.max(...cells.map((cell) => Math.abs(cell.delta)), 0);
+  const trades = cells.reduce((sum, cell) => sum + (cell.trades ?? 0), 0);
+  return (
+    <div className="detail-board">
+      <div className="of-head">
+      <div className="stat-row">
+        <div className="stat">
+          <span>Delta</span>
+          <strong className={bar.totalDelta >= 0 ? "buy" : "sell"}>{fmtQty(bar.totalDelta)}</strong>
+        </div>
+        <div className="stat">
+          <span>Volume</span>
+          <strong>{fmtQty(bar.totalVolume)}</strong>
+        </div>
+        <div className="stat">
+          <span>High / low</span>
+          <strong>{fmt(bar.high)} / {fmt(bar.low)}</strong>
+        </div>
+      </div>
+      <div className="chip-row">
+        <span className={bar.absorption ? "chip hot" : "chip"}>Absorption {bar.absorption ? "yes*" : "no"}</span>
+        <span className={bar.exhaustion ? "chip hot" : "chip"}>Exhaustion {bar.exhaustion ? "yes*" : "no"}</span>
+        <span className={bar.unfinishedAuction ? "chip hot" : "chip"}>
+          Unfinished auction {bar.unfinishedAuction ? "yes" : "no"}
+        </span>
+        {trades > 0 && <span className="chip">{trades} trades</span>}
+      </div>
+      </div>
+      <div className="scroll-box">
+        <table className="table fp-table">
+          <thead>
+            <tr>
+              <th>Price</th>
+              <th>Bid</th>
+              <th>Ask</th>
+              <th>Total</th>
+              <th>Delta</th>
+              <th>Imbalance</th>
+            </tr>
+          </thead>
+          <tbody>
+            {cells.map((cell) => {
+              const total = cell.bidVolume + cell.askVolume;
+              const scale = total || 1;
+              const mark = imbalances.find((item) => item.price === cell.price);
+              const flags = [
+                mark?.stacked ? "stacked" : "",
+                mark?.diagonal ? "diagonal" : "",
+                mark ? mark.side : "",
+              ].filter(Boolean);
+              const title = `Price ${fmt(cell.price)}. Bid ${fmtQty(cell.bidVolume)}. Ask ${fmtQty(cell.askVolume)}. Total ${fmtQty(total)}. Delta ${fmtQty(cell.delta)}. ${mark ? `Imbalance ${flags.join(" ")} ${mark.ratio ?? ""}` : "No imbalance flag."}`;
+              return (
+                <tr
+                  key={cell.price}
+                  title={title}
+                  className={[
+                    cell.price === bar.open ? "is-open" : "",
+                    cell.price === bar.close ? "is-close" : "",
+                    total > 0 && total === maxTotal ? "is-heavy" : "",
+                    maxAbsDelta > 0 && Math.abs(cell.delta) === maxAbsDelta ? "is-delta" : "",
+                  ].join(" ")}
+                >
+                  <td>
+                    {fmt(cell.price)}
+                    {cell.price === bar.open && <em> open</em>}
+                    {cell.price === bar.close && <em> close</em>}
+                  </td>
+                  <td className="sell">
+                    <span className="mini-bar sell-swatch" style={{ width: `${(cell.bidVolume / scale) * 100}%` }} />
+                    {fmtQty(cell.bidVolume)}
+                  </td>
+                  <td className="buy">
+                    <span className="mini-bar buy-swatch" style={{ width: `${(cell.askVolume / scale) * 100}%` }} />
+                    {fmtQty(cell.askVolume)}
+                  </td>
+                  <td>{fmtQty(total)}</td>
+                  <td className={cell.delta >= 0 ? "buy" : "sell"}>{fmtQty(cell.delta)}</td>
+                  <td>
+                    {mark
+                      ? `${mark.side}${mark.ratio != null ? ` ${mark.ratio.toFixed(1)}×` : ""}${mark.stacked ? " stacked" : ""}${mark.diagonal ? " diagonal" : ""}`
+                      : "-"}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      <div className="stat-row">
+        <div className="stat">
+          <span>Session</span>
+          <strong>{fmtClock(bar.openTime)} – {fmtClock(bar.closeTime)}</strong>
+        </div>
+        <div className="stat">
+          <span>Open / close</span>
+          <strong>{fmt(bar.open)} / {fmt(bar.close)}</strong>
+        </div>
+        <div className="stat">
+          <span>Session CVD</span>
+          <strong className={(sessionCvd ?? 0) >= 0 ? "buy" : "sell"}>{fmtQty(sessionCvd)}</strong>
+        </div>
+      </div>
+      <p className="disclaimer">* absorption and exhaustion are heuristics, not proven institutional activity. Hover a row for the level detail.</p>
+      </div>
+    </div>
+  );
+}
+
+function SignalBoard({
+  signal,
+  symbol,
+  cvd,
+  footprint,
+  structure,
+}: {
+  signal?: TradingSignal;
+  symbol?: string;
+  cvd?: CvdState;
+  footprint?: FootprintBar;
+  structure?: MarketStructureState;
+}) {
+  const direction = signal?.direction ?? "WAIT";
+  return (
+    <div className="detail-board">
+      <div className="of-head">
+      <div className={`signal-banner signal-${direction.toLowerCase()}`}>
+        <div>
+          <span className="desk-kicker">Bias</span>
+          <div className="signal-dir">{direction}</div>
+        </div>
+        <div className="confidence">
+          <span className="desk-kicker">Confidence</span>
+          <strong>{((signal?.confidence ?? 0) * 100).toFixed(0)}%</strong>
+          <div className="confidence-track">
+            <span style={{ width: `${Math.min(100, (signal?.confidence ?? 0) * 100)}%` }} />
+          </div>
+        </div>
+      </div>
+      </div>
+      <div className="fill-scroll">
+      <div className="metric-grid">
+        <div className="metric">
+          <span>Entry</span>
+          <strong>{fmt(signal?.entry)}</strong>
+        </div>
+        <div className="metric">
+          <span>Stop</span>
+          <strong className="sell">{fmt(signal?.stopLoss)}</strong>
+        </div>
+        <div className="metric">
+          <span>Take profit</span>
+          <strong className="buy">{(signal?.takeProfit ?? []).map(fmt).join(" / ") || "-"}</strong>
+        </div>
+        <div className="metric">
+          <span>Risk / reward</span>
+          <strong>{signal?.riskReward ?? "-"}</strong>
+        </div>
+      </div>
+      <div className="desk-kicker">Checks already computed</div>
+      <div className="chip-row">
+        <span className={signal?.orderFlowOk ? "chip ok" : "chip"}>Order flow {signal?.orderFlowOk ? "confirmed" : "waiting"}</span>
+        <span className={signal?.deltaOk ? "chip ok" : "chip"}>Delta {signal?.deltaOk ? "confirmed" : "waiting"}</span>
+        <span className={signal?.volumeOk ? "chip ok" : "chip"}>Volume {signal?.volumeOk ? "confirmed" : "waiting"}</span>
+        <span className={signal?.structureOk ? "chip ok" : "chip"}>Structure {signal?.structureOk ? "confirmed" : "waiting"}</span>
+      </div>
+      <div className="reason-grid">
+        <div>
+          <div className="desk-kicker">Order flow context</div>
+          <ul className="list">
+            <li>CVD {cvd?.cvd == null ? "-" : fmtQty(cvd.cvd)} · divergence {cvd?.divergence ?? "-"}</li>
+            <li>Absorption {footprint?.absorption ? "yes*" : "no"} · exhaustion {footprint?.exhaustion ? "yes*" : "no"}</li>
+            <li>Footprint delta {footprint ? fmtQty(footprint.totalDelta) : "-"}</li>
+          </ul>
+        </div>
+        <div>
+          <div className="desk-kicker">Structure context</div>
+          <ul className="list">
+            <li>Trend {structure?.trend ?? "-"}</li>
+            <li>
+              BOS {structure?.lastBos ? `${structure.lastBos.direction} @ ${fmt(structure.lastBos.price)}` : "-"}
+            </li>
+            <li>
+              CHoCH {structure?.lastChoch ? `${structure.lastChoch.direction} @ ${fmt(structure.lastChoch.price)}` : "-"}
+            </li>
+          </ul>
+        </div>
+      </div>
+      <div className="desk-kicker">Confirmations</div>
+      <ul className="list">
+        {(signal?.confirmations ?? []).map((item) => (
+          <li key={item}>{item}</li>
+        ))}
+        {(signal?.confirmations ?? []).length === 0 && <li>None yet</li>}
+      </ul>
+      <div className="reason-grid">
+        <div>
+          <div className="desk-kicker buy">Supporting</div>
+          <ul className="list">
+            {(signal?.reasonsFor ?? []).map((item) => (
+              <li key={item}>{item}</li>
+            ))}
+            {(signal?.reasonsFor ?? []).length === 0 && <li>-</li>}
+          </ul>
+        </div>
+        <div>
+          <div className="desk-kicker sell">Against</div>
+          <ul className="list">
+            {(signal?.reasonsAgainst ?? []).map((item) => (
+              <li key={item}>{item}</li>
+            ))}
+            {(signal?.reasonsAgainst ?? []).length === 0 && <li>-</li>}
+          </ul>
+        </div>
+      </div>
+      <div className="desk-kicker">Invalidation</div>
+      <ul className="list">
+        {(signal?.invalidation ?? []).map((item) => (
+          <li key={item}>{item}</li>
+        ))}
+        {(signal?.invalidation ?? []).length === 0 && <li>-</li>}
+      </ul>
+      <div className="desk-kicker">Current signal</div>
+      <table className="table">
+        <thead>
+          <tr>
+            <th>Time</th>
+            <th>Pair</th>
+            <th>Direction</th>
+            <th>Price</th>
+            <th>Strength</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>{fmtClock(signal?.timestamp)}</td>
+            <td>{symbol ?? "-"}</td>
+            <td className={direction === "LONG" ? "buy" : direction === "SHORT" ? "sell" : ""}>{direction}</td>
+            <td>{fmt(signal?.entry)}</td>
+            <td>{((signal?.confidence ?? 0) * 100).toFixed(0)}%</td>
+          </tr>
+        </tbody>
+      </table>
+      <p className="disclaimer">The feed provides the current signal only. Order blocks, fair value gaps, and liquidity sweeps are not separate signals in this engine.</p>
+      </div>
+    </div>
+  );
+}
+
+function CvdBoard({ cvd, symbol }: { cvd?: CvdState; symbol: string }) {
+  const points = cvd?.points ?? [];
+  const first = points[0];
+  const last = points[points.length - 1];
+  const change = first && last ? last.cvd - first.cvd : undefined;
+  const positive = points.reduce((sum, point) => sum + (point.delta > 0 ? point.delta : 0), 0);
+  const negative = points.reduce((sum, point) => sum + (point.delta < 0 ? point.delta : 0), 0);
+  const priceUp = first && last ? last.price >= first.price : undefined;
+  const cvdUp = change != null ? change >= 0 : undefined;
+  const relation =
+    priceUp == null || cvdUp == null
+      ? "Waiting for enough session points."
+      : priceUp && cvdUp
+        ? "Price and CVD both rose across the plotted points."
+        : priceUp && !cvdUp
+          ? "Price rose while CVD fell across the plotted points."
+          : !priceUp && !cvdUp
+            ? "Price and CVD both fell across the plotted points."
+            : "Price fell while CVD rose across the plotted points.";
+  return (
+    <div className="detail-board">
+      <div className="of-head">
+      <div className="stat-row">
+        <div className="stat">
+          <span>Current CVD</span>
+          <strong className={(cvd?.cvd ?? 0) >= 0 ? "buy" : "sell"}>{fmtQty(cvd?.cvd)}</strong>
+        </div>
+        <div className="stat">
+          <span>Change on chart</span>
+          <strong className={(change ?? 0) >= 0 ? "buy" : "sell"}>{fmtQty(change)}</strong>
+        </div>
+        <div className="stat">
+          <span>Latest delta</span>
+          <strong className={(last?.delta ?? 0) >= 0 ? "buy" : "sell"}>{fmtQty(last?.delta)}</strong>
+        </div>
+      </div>
+      </div>
+      <div className="chart-stage">
+        <CvdChart points={points} divergence={cvd?.divergence} />
+        <DeltaHist points={points} />
+      <div className="chip-row">
+        <span className={`chip ${divergenceClass(cvd?.divergence)}`}>Divergence {cvd?.divergence ?? "-"}</span>
+        <span className={cvd?.exhaustion ? "chip hot" : "chip"}>Exhaustion {cvd?.exhaustion ? "yes*" : "no"}</span>
+        <span className={(cvd?.cvd ?? 0) >= 0 ? "chip ok" : "chip down"}>
+          {(cvd?.cvd ?? 0) >= 0 ? "Net buying pressure" : "Net selling pressure"}
+        </span>
+      </div>
+      <div className="cvd-legend">
+        <span><i className="swatch buy-swatch" /> CVD</span>
+        <span><i className="swatch price-swatch" /> Price</span>
+        <span className="muted">Dashed line is zero. Session window.</span>
+      </div>
+      <div className="stat-row">
+        <div className="stat">
+          <span>Positive deltas</span>
+          <strong className="buy">{fmtQty(points.length ? positive : undefined)}</strong>
+        </div>
+        <div className="stat">
+          <span>Negative deltas</span>
+          <strong className="sell">{fmtQty(points.length ? negative : undefined)}</strong>
+        </div>
+        <div className="stat">
+          <span>Session start</span>
+          <strong>{fmtClock(cvd?.sessionStart)}</strong>
+        </div>
+      </div>
+      <p className="disclaimer">{relation} * exhaustion is a heuristic.</p>
+      <CandleChart symbol={symbol} />
+      </div>
+    </div>
+  );
+}
+
+function DeltaHist({ points }: { points: { delta: number }[] }) {
+  const view = points.slice(-80);
+  const max = Math.max(...view.map((point) => Math.abs(point.delta)), 1);
+  if (view.length < 2) return null;
+  return (
+    <div className="delta-hist" aria-label="Volume delta histogram">
+      {view.map((point, index) => (
+        <span
+          key={`${point.delta}-${index}`}
+          className={point.delta >= 0 ? "up" : "down"}
+          style={{ height: `${Math.max(12, (Math.abs(point.delta) / max) * 100)}%` }}
+          title={`Delta ${fmtQty(point.delta)}`}
+        />
+      ))}
+    </div>
+  );
+}
+
+function CvdChart({
+  points,
+  divergence,
+}: {
+  points: { cvd: number; price: number }[];
+  divergence?: string;
+}) {
+  if (points.length < 2) return <div className="muted">Waiting for session delta…</div>;
+  const width = 320;
+  const height = 150;
+  const cvdVals = points.map((point) => point.cvd);
+  const priceVals = points.map((point) => point.price);
+  const cvdMin = Math.min(...cvdVals, 0);
+  const cvdMax = Math.max(...cvdVals, 0);
+  const priceMin = Math.min(...priceVals);
+  const priceMax = Math.max(...priceVals);
+  const yCvd = (value: number) => 12 + ((cvdMax - value) / (cvdMax - cvdMin || 1)) * (height - 24);
+  const yPrice = (value: number) => 12 + ((priceMax - value) / (priceMax - priceMin || 1)) * (height - 24);
+  const line = (pick: (point: (typeof points)[number]) => number, y: (value: number) => number) =>
+    points.map((point, index) => `${(index / (points.length - 1)) * width},${y(pick(point))}`).join(" ");
+  const zeroY = yCvd(0);
+  const last = cvdVals[cvdVals.length - 1] ?? 0;
+  const color = last >= 0 ? "#0ecb81" : "#f6465d";
+  return (
+    <svg className="cvd-chart" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" role="img" aria-label="Session price and cumulative volume delta">
+      <line x1="0" x2={width} y1={zeroY} y2={zeroY} stroke="#2a3340" strokeDasharray="3 3" />
+      <polygon points={`0,${zeroY} ${line((point) => point.cvd, yCvd)} ${width},${zeroY}`} fill={color} opacity="0.14" />
+      <polyline fill="none" stroke="#8b98a8" strokeWidth="1.5" points={line((point) => point.price, yPrice)} />
+      <polyline fill="none" stroke={color} strokeWidth="2" points={line((point) => point.cvd, yCvd)} />
+      {divergence === "bullish" && <text x="8" y="16" fill="#0ecb81" fontSize="11">Bullish divergence</text>}
+      {divergence === "bearish" && <text x="8" y="16" fill="#f6465d" fontSize="11">Bearish divergence</text>}
+    </svg>
+  );
+}
+
+function StructureBoard({
+  profile,
+  structure,
+  lastPrice,
+}: {
+  profile?: VolumeProfile;
+  structure?: MarketStructureState;
+  lastPrice?: number;
+}) {
+  const levels = [...(profile?.levels ?? [])].sort((a, b) => b.price - a.price);
+  const max = Math.max(...levels.map((level) => level.volume), 1);
+  const vah = profile?.vah;
+  const val = profile?.val;
+  const inValue = (price: number) => vah != null && val != null && price <= Math.max(vah, val) && price >= Math.min(vah, val);
+  return (
+    <div className="detail-board">
+      <div className="of-head">
+      <div className="level-row">
+        <div className="level poc">
+          <span>POC</span>
+          <strong>{fmt(profile?.poc)}</strong>
+        </div>
+        <div className="level vah">
+          <span>VAH</span>
+          <strong>{fmt(profile?.vah)}</strong>
+        </div>
+        <div className="level val">
+          <span>VAL</span>
+          <strong>{fmt(profile?.val)}</strong>
+        </div>
+      </div>
+      </div>
+      <div className="scroll-box">
+      <div className="desk-kicker">Volume at price</div>
+        {levels.length === 0 && <div className="muted">No profile volume yet.</div>}
+        {levels.map((level) => {
+          const hvn = (profile?.hvn ?? []).includes(level.price);
+          const lvn = (profile?.lvn ?? []).includes(level.price);
+          const poc = level.price === profile?.poc;
+          const buy = level.buyVolume ?? 0;
+          const sell = level.sellVolume ?? 0;
+          const split = buy + sell;
+          return (
+            <div
+              key={level.price}
+              className={`profile-row ${poc ? "is-poc" : ""} ${inValue(level.price) ? "in-value" : ""}`}
+              title={`Price ${fmt(level.price)}. Volume ${fmtQty(level.volume)}.${split ? ` Buy ${fmtQty(buy)}. Sell ${fmtQty(sell)}.` : ""} ${poc ? "POC." : ""} ${hvn ? "HVN." : ""} ${lvn ? "LVN." : ""}`}
+            >
+              <span>
+                {fmt(level.price)}
+                {poc && <em> POC</em>}
+                {hvn && <em> HVN</em>}
+                {lvn && <em> LVN</em>}
+              </span>
+              <div className="profile-track">
+                {split > 0 ? (
+                  <>
+                    <span className="sell-fill" style={{ width: `${(sell / max) * 100}%` }} />
+                    <span className="buy-fill" style={{ width: `${(buy / max) * 100}%` }} />
+                  </>
+                ) : (
+                  <span style={{ width: `${(level.volume / max) * 100}%` }} />
+                )}
+              </div>
+            </div>
+          );
+        })}
+      <div className="metric-grid">
+        <div className="metric">
+          <span>Profile volume</span>
+          <strong>{fmtQty(profile?.totalVolume)}</strong>
+        </div>
+        <div className="metric">
+          <span>Window</span>
+          <strong>{fmtClock(profile?.from)} – {fmtClock(profile?.to)}</strong>
+        </div>
+        <div className="metric">
+          <span>Nearest support</span>
+          <strong className="buy">{fmt(nearest(structure?.support, lastPrice))}</strong>
+        </div>
+        <div className="metric">
+          <span>Nearest resistance</span>
+          <strong className="sell">{fmt(nearest(structure?.resistance, lastPrice))}</strong>
+        </div>
+      </div>
+      <div className="chip-row">
+        <span className={`chip ${trendClass(structure?.trend)}`}>Trend {structure?.trend ?? "-"}</span>
+        <span className="chip">Prev high {fmt(structure?.previousSessionHigh)}</span>
+        <span className="chip">Prev low {fmt(structure?.previousSessionLow)}</span>
+      </div>
+      <div className="desk-kicker">Swings</div>
+      <div className="chip-row">
+        {(structure?.swings ?? []).slice(-8).map((swing) => (
+          <span className={`chip ${swing.type === "HH" || swing.type === "HL" ? "up" : "down"}`} key={`${swing.type}-${swing.timestamp}-${swing.price}`}>
+            {swing.type} {fmt(swing.price)}
+          </span>
+        ))}
+        {(structure?.swings ?? []).length === 0 && <span className="muted">-</span>}
+      </div>
+      <div className="chip-row">
+        <span className="chip">
+          BOS {structure?.lastBos ? `${structure.lastBos.direction} @ ${fmt(structure.lastBos.price)} ${fmtClock(structure.lastBos.timestamp)}` : "-"}
+        </span>
+        <span className="chip">
+          CHoCH {structure?.lastChoch ? `${structure.lastChoch.direction} @ ${fmt(structure.lastChoch.price)} ${fmtClock(structure.lastChoch.timestamp)}` : "-"}
+        </span>
+      </div>
+      <div className="reason-grid">
+        <div>
+          <div className="desk-kicker buy">Support</div>
+          <ul className="list">
+            {(structure?.support ?? []).map((price) => (
+              <li key={`s-${price}`}>{fmt(price)}</li>
+            ))}
+            {(structure?.support ?? []).length === 0 && <li>-</li>}
+          </ul>
+        </div>
+        <div>
+          <div className="desk-kicker sell">Resistance</div>
+          <ul className="list">
+            {(structure?.resistance ?? []).map((price) => (
+              <li key={`r-${price}`}>{fmt(price)}</li>
+            ))}
+            {(structure?.resistance ?? []).length === 0 && <li>-</li>}
+          </ul>
+        </div>
+      </div>
+      <div className="desk-kicker">Liquidity pools</div>
+      <div className="chip-row">
+        {(structure?.liquidityPools ?? []).map((pool) => (
+          <span className="chip" key={`${pool.side}-${pool.price}`}>
+            {pool.label} {pool.side} {fmt(pool.price)}
+          </span>
+        ))}
+        {(structure?.liquidityPools ?? []).length === 0 && <span className="muted">-</span>}
+      </div>
+      </div>
+    </div>
+  );
+}
+
+function nearest(prices: number[] | undefined, last?: number): number | undefined {
+  if (!prices?.length) return undefined;
+  if (last == null) return prices[0];
+  return [...prices].sort((a, b) => Math.abs(a - last) - Math.abs(b - last))[0];
+}
+
+function fmtClock(value?: number): string {
+  if (value == null || !Number.isFinite(value) || value <= 0) return "-";
+  return new Date(value).toLocaleTimeString();
+}
+
+function divergenceClass(value?: string): string {
+  if (value === "bullish") return "up";
+  if (value === "bearish") return "down";
+  return "";
+}
+
+function trendClass(value?: string): string {
+  const text = (value ?? "").toLowerCase();
+  if (text.includes("bull") || text === "up") return "up";
+  if (text.includes("bear") || text === "down") return "down";
+  return "";
 }
