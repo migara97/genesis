@@ -433,9 +433,15 @@ select {
 }
 
 .chip.ok,
-.chip.up {
+.chip.up,
+.chip.grade-a {
   color: var(--green);
   border-color: rgba(14, 203, 129, 0.45);
+}
+
+.chip.grade-a {
+  font-weight: 600;
+  letter-spacing: 0.02em;
 }
 
 .chip.hot,

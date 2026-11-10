@@ -1,23 +1,32 @@
 import { useEffect, useState } from "react";
 import {
   emergencyShutdown,
+  fetchBacktest,
   fetchMode,
   fetchOrders,
   fetchPositions,
   fetchRisk,
+  fetchSignalJournal,
+  fetchSignalMetrics,
+  fetchValidationReport,
   placeOrder,
   setMode,
   updateRisk,
 } from "./api";
 import type {
+  BacktestResultView,
   CvdState,
   ExecutionMode,
   FootprintBar,
   MarketSnapshot,
   MarketStructureState,
+  MultiTimeframeContext,
   OrderRecord,
   Position,
   RiskConfig,
+  SignalJournalMetrics,
+  SignalSetupRow,
+  StructureZonesState,
   TradingSignal,
   VolumeProfile,
 } from "./types";
@@ -185,7 +194,7 @@ export default function App() {
         <section className="panel of-fill">
           <h3>Signal Engine</h3>
           <div className="panel-body">
-            <SignalBoard signal={snap?.signal} symbol={snap?.symbol} cvd={snap?.cvd} footprint={snap?.footprint} structure={snap?.structure} />
+            <SignalBoard signal={snap?.signal} symbol={snap?.symbol} cvd={snap?.cvd} footprint={snap?.footprint} structure={snap?.structure} mtf={snap?.mtf} zones={snap?.zones} />
           </div>
         </section>
 
@@ -197,21 +206,21 @@ export default function App() {
               <div className="ticket">
                 <label className="field">
                   <span>Quantity</span>
-                  <input value={qty} onChange={(e) => setQty(e.target.value)} placeholder="qty" />
+              <input value={qty} onChange={(e) => setQty(e.target.value)} placeholder="qty" />
                 </label>
                 <label className="field">
                   <span>Stop loss</span>
-                  <input value={stop} onChange={(e) => setStop(e.target.value)} placeholder="stop" />
+              <input value={stop} onChange={(e) => setStop(e.target.value)} placeholder="stop" />
                 </label>
-              </div>
+            </div>
               <div className="trade-actions">
-                <button className="success" onClick={() => void submit("BUY")}>
-                  Buy / Long
-                </button>
-                <button className="danger" onClick={() => void submit("SELL")}>
-                  Sell / Short
-                </button>
-              </div>
+              <button className="success" onClick={() => void submit("BUY")}>
+                Buy / Long
+              </button>
+              <button className="danger" onClick={() => void submit("SELL")}>
+                Sell / Short
+              </button>
+            </div>
             </div>
             {statusMsg && <div className="status-line">{statusMsg}</div>}
             {error && <div className="signal-short">{error}</div>}
@@ -506,14 +515,68 @@ function SignalBoard({
   cvd,
   footprint,
   structure,
+  mtf,
+  zones,
 }: {
   signal?: TradingSignal;
   symbol?: string;
   cvd?: CvdState;
   footprint?: FootprintBar;
   structure?: MarketStructureState;
+  mtf?: MultiTimeframeContext;
+  zones?: StructureZonesState;
 }) {
   const direction = signal?.direction ?? "WAIT";
+  const [metrics, setMetrics] = useState<SignalJournalMetrics | null>(null);
+  const [journal, setJournal] = useState<SignalSetupRow[]>([]);
+  const [backtest, setBacktest] = useState<BacktestResultView | null>(null);
+  const [btBusy, setBtBusy] = useState(false);
+  const [btError, setBtError] = useState<string | null>(null);
+  const [validation, setValidation] = useState<Record<string, unknown> | null>(null);
+
+  useEffect(() => {
+    if (!symbol) return;
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const [m, j, v] = await Promise.all([
+          fetchSignalMetrics(symbol),
+          fetchSignalJournal(symbol, 12),
+          fetchValidationReport(symbol),
+        ]);
+        if (cancelled) return;
+        setMetrics(m);
+        setJournal(j.setups);
+        setValidation(v);
+      } catch {
+        if (!cancelled) {
+          setMetrics(null);
+          setJournal([]);
+          setValidation(null);
+        }
+      }
+    };
+    void load();
+    const timer = setInterval(() => void load(), 15_000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [symbol, signal?.lifecycle, signal?.setupId]);
+
+  const runBacktest = async () => {
+    if (!symbol) return;
+    setBtBusy(true);
+    setBtError(null);
+    try {
+      setBacktest(await fetchBacktest(symbol));
+    } catch (err) {
+      setBtError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBtBusy(false);
+    }
+  };
+
   return (
     <div className="detail-board">
       <div className="of-head">
@@ -529,6 +592,15 @@ function SignalBoard({
             <span style={{ width: `${Math.min(100, (signal?.confidence ?? 0) * 100)}%` }} />
           </div>
         </div>
+      </div>
+      <div className="chip-row">
+        <span className={`chip ${entryGradeChipClass(signal?.entryGrade)}`} title={(signal?.entryQualityNotes ?? []).join("\n")}>
+          Entry {signal?.entryGrade ?? "WAIT"}
+        </span>
+        <span className={`chip ${lifecycleChipClass(signal?.lifecycle)}`}>
+          Lifecycle {signal?.lifecycle ?? "WATCHING"}
+        </span>
+        {signal?.lifecycleNote ? <span className="chip">{signal.lifecycleNote}</span> : null}
       </div>
       </div>
       <div className="fill-scroll">
@@ -557,6 +629,36 @@ function SignalBoard({
         <span className={signal?.volumeOk ? "chip ok" : "chip"}>Volume {signal?.volumeOk ? "confirmed" : "waiting"}</span>
         <span className={signal?.structureOk ? "chip ok" : "chip"}>Structure {signal?.structureOk ? "confirmed" : "waiting"}</span>
       </div>
+      <div className="metric-grid">
+        <div className="metric">
+          <span>Long score</span>
+          <strong className="buy">{signal?.score?.longScore ?? "-"}</strong>
+        </div>
+        <div className="metric">
+          <span>Short score</span>
+          <strong className="sell">{signal?.score?.shortScore ?? "-"}</strong>
+        </div>
+        <div className="metric">
+          <span>Families</span>
+          <strong>{(signal?.score?.independentFamilies ?? []).join(", ") || "-"}</strong>
+        </div>
+        <div className="metric">
+          <span>Setup id</span>
+          <strong>{signal?.setupId ?? signal?.id ?? "-"}</strong>
+        </div>
+      </div>
+      {signal?.score?.factors?.length ? (
+        <>
+          <div className="desk-kicker">Score factors</div>
+          <ul className="list">
+            {signal.score.factors.map((factor) => (
+              <li key={`${factor.id}-${factor.side}-${factor.reason}`}>
+                {factor.side} · {factor.family} · {factor.weight} · {factor.source} — {factor.reason}
+              </li>
+            ))}
+          </ul>
+        </>
+      ) : null}
       <div className="reason-grid">
         <div>
           <div className="desk-kicker">Order flow context</div>
@@ -578,6 +680,38 @@ function SignalBoard({
             </li>
           </ul>
         </div>
+      </div>
+      <div className="desk-kicker">Multi-timeframe</div>
+      <div className="chip-row">
+        {(mtf?.frames ?? []).map((frame) => (
+          <span key={frame.interval} className={`chip ${trendClass(frame.trend)}`}>
+            {frame.interval} {frame.trend}
+          </span>
+        ))}
+        {(mtf?.frames ?? []).length === 0 && <span className="chip">MTF loading…</span>}
+        {mtf?.conflictWithPrimary ? <span className="chip hot">HTF conflict</span> : null}
+      </div>
+      <div className="desk-kicker">Zones (rule-based)</div>
+      <div className="chip-row">
+        {(zones?.orderBlocks ?? []).slice(-4).map((block) => (
+          <span key={block.id} className={`chip ${trendClass(block.direction)}`}>
+            OB {block.direction} {fmt(block.low)}–{fmt(block.high)}
+          </span>
+        ))}
+        {(zones?.fairValueGaps ?? []).slice(-4).map((gap) => (
+          <span key={gap.id} className={`chip ${trendClass(gap.direction)}`}>
+            FVG {gap.direction} {fmt(gap.low)}–{fmt(gap.high)}
+          </span>
+        ))}
+        {(zones?.recentSweeps ?? []).slice(-3).map((sweep) => (
+          <span key={sweep.id} className={`chip ${trendClass(sweep.bias)}`}>
+            {sweep.side} sweep → {sweep.bias}
+          </span>
+        ))}
+        {(zones?.orderBlocks?.length ?? 0) +
+          (zones?.fairValueGaps?.length ?? 0) +
+          (zones?.recentSweeps?.length ?? 0) ===
+          0 && <span className="chip">No active OB/FVG/sweeps</span>}
       </div>
       <div className="desk-kicker">Confirmations</div>
       <ul className="list">
@@ -634,7 +768,125 @@ function SignalBoard({
           </tr>
         </tbody>
       </table>
-      <p className="disclaimer">The feed provides the current signal only. Order blocks, fair value gaps, and liquidity sweeps are not separate signals in this engine.</p>
+      <div className="desk-kicker">Live journal metrics</div>
+      <div className="metric-grid">
+        <div className="metric">
+          <span>Setups</span>
+          <strong>{metrics?.setups ?? "-"}</strong>
+        </div>
+        <div className="metric">
+          <span>TP / SL</span>
+          <strong>
+            {metrics ? `${metrics.hitTp} / ${metrics.hitSl}` : "-"}
+          </strong>
+        </div>
+        <div className="metric">
+          <span>Win rate</span>
+          <strong>
+            {metrics?.winRate == null ? "n/a" : `${(metrics.winRate * 100).toFixed(0)}%`}
+          </strong>
+        </div>
+        <div className="metric">
+          <span>Open</span>
+          <strong>{metrics?.open ?? "-"}</strong>
+        </div>
+      </div>
+      {metrics?.sampleNote ? <p className="disclaimer">{metrics.sampleNote}</p> : null}
+      <div className="desk-kicker">Recent setups</div>
+      <ul className="list">
+        {journal.map((row) => (
+          <li key={`${row.setupId}-${row.updatedAt}`}>
+            {row.direction} · {row.lifecycle} · entry {fmt(row.entry ?? undefined)} ·{" "}
+            {row.pnlPrice == null ? "pnl n/a" : `pnl/u ${fmtQty(row.pnlPrice)}`}
+          </li>
+        ))}
+        {journal.length === 0 && <li>No journal rows yet</li>}
+      </ul>
+      <div className="desk-kicker">Forward paper validation</div>
+      {validation?.performance ? (
+        <div className="metric-grid">
+          <div className="metric">
+            <span>Resolved TP/SL</span>
+            <strong>{String((validation.performance as { closedTrades?: number }).closedTrades ?? "-")}</strong>
+          </div>
+          <div className="metric">
+            <span>Win rate (CI)</span>
+            <strong>
+              {(() => {
+                const p = validation.performance as {
+                  winRate?: number | null;
+                  winRateCi95?: { low: number; high: number } | null;
+                };
+                if (p.winRate == null) return "n/a";
+                const ci = p.winRateCi95;
+                return ci
+                  ? `${(p.winRate * 100).toFixed(0)}% [${(ci.low * 100).toFixed(0)}–${(ci.high * 100).toFixed(0)}]`
+                  : `${(p.winRate * 100).toFixed(0)}%`;
+              })()}
+            </strong>
+          </div>
+          <div className="metric">
+            <span>Net pnl / u</span>
+            <strong>
+              {String((validation.performance as { netProfit?: number }).netProfit ?? "-")}
+            </strong>
+          </div>
+          <div className="metric">
+            <span>Open paper</span>
+            <strong>{String(validation.openTrades ?? "-")}</strong>
+          </div>
+        </div>
+      ) : (
+        <p className="disclaimer">Validation report loading…</p>
+      )}
+      {validation?.calibration ? (
+        <p className="disclaimer">
+          {String((validation.calibration as { sampleNote?: string }).sampleNote ?? "")}
+        </p>
+      ) : null}
+      {validation?.parity ? (
+        <p className="disclaimer">
+          Tape: {String((validation.parity as { tape?: string }).tape ?? "")}
+        </p>
+      ) : null}
+      <div className="desk-kicker">Historical backtest (structure proxy)</div>
+      <div className="chip-row">
+        <button type="button" className="chip" disabled={!symbol || btBusy} onClick={() => void runBacktest()}>
+          {btBusy ? "Running…" : "Run structure/MTF proxy backtest"}
+        </button>
+      </div>
+      {btError ? <p className="disclaimer sell">{btError}</p> : null}
+      {backtest ? (
+        <>
+          <div className="metric-grid">
+            <div className="metric">
+              <span>Trades</span>
+              <strong>{backtest.trades.length}</strong>
+            </div>
+            <div className="metric">
+              <span>Win rate</span>
+              <strong>
+                {backtest.winRate == null ? "n/a" : `${(backtest.winRate * 100).toFixed(0)}%`}
+              </strong>
+            </div>
+            <div className="metric">
+              <span>Expectancy</span>
+              <strong>{backtest.expectancy == null ? "n/a" : fmtQty(backtest.expectancy)}</strong>
+            </div>
+            <div className="metric">
+              <span>Total pnl</span>
+              <strong>{fmtQty(backtest.totalPnl)}</strong>
+            </div>
+          </div>
+          <p className="disclaimer">{backtest.limitation}</p>
+        </>
+      ) : null}
+      <p className="disclaimer">
+        Confidence is a model score from configurable rule weights, not a win-rate or statistical probability.
+        OB/FVG/sweeps use explicit OHLC rules (heuristic) — not institutional labels. MTF/BOS/CHoCH/VP are derived. DOM needs matching trade delta.
+        Journal and backtest report observed samples only — never invented edge.
+        {signal?.score?.modelNote ? ` ${signal.score.modelNote}` : ""}
+      </p>
       </div>
     </div>
   );
@@ -922,6 +1174,19 @@ function divergenceClass(value?: string): string {
   if (value === "bullish") return "up";
   if (value === "bearish") return "down";
   return "";
+}
+
+function lifecycleChipClass(value?: string): string {
+  if (value === "CONFIRMED" || value === "ACTIVE" || value === "HIT_TP") return "ok";
+  if (value === "HIT_SL" || value === "INVALIDATED" || value === "EXPIRED" || value === "TIMEOUT") return "hot";
+  if (value === "PENDING_CONFIRM") return "up";
+  return "";
+}
+
+function entryGradeChipClass(value?: string): string {
+  if (value === "A+") return "grade-a";
+  if (value === "STANDARD") return "up";
+  return "hot";
 }
 
 function trendClass(value?: string): string {

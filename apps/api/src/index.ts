@@ -6,7 +6,7 @@ import type { PlaceOrderRequest } from "@of/shared";
 import { config } from "./config.js";
 import { executionService } from "./execution.js";
 import { marketHub } from "./marketHub.js";
-import { backtestFromCandles } from "./backtest.js";
+import { runSignalBacktest } from "./backtest.js";
 import { BinanceFuturesMarketDataAdapter, OkxSwapMarketDataAdapter } from "@of/exchange";
 import { startMarketSync } from "./markets/sync.js";
 import {
@@ -16,6 +16,10 @@ import {
   replaceCandleCache,
   setFavorite,
 } from "./markets/store.js";
+import { computeJournalMetrics, listSignalSetups } from "./signals/journal.js";
+import { listPaperTrades } from "./validation/paperLedger.js";
+import { buildValidationReport } from "./validation/report.js";
+import { tapeCoverageNote } from "./validation/tapeArchive.js";
 
 const app = Fastify({
   logger: { level: config.logLevel },
@@ -159,18 +163,97 @@ app.get("/api/markets/:symbol/candles", async (req, reply) => {
   return { symbol, interval, source: "exchange_reported", candles };
 });
 
+app.get("/api/signals/journal", async (req) => {
+  const q = req.query as { symbol?: string; limit?: string };
+  const limit = q.limit ? Number(q.limit) : 50;
+  return {
+    setups: listSignalSetups({
+      symbol: q.symbol?.toUpperCase(),
+      limit: Number.isFinite(limit) ? limit : 50,
+    }),
+  };
+});
+
+app.get("/api/signals/metrics", async (req) => {
+  const q = req.query as { symbol?: string };
+  return computeJournalMetrics(q.symbol?.toUpperCase());
+});
+
+app.get("/api/validation/report", async (req) => {
+  const q = req.query as { symbol?: string };
+  return buildValidationReport(q.symbol?.toUpperCase());
+});
+
+app.get("/api/validation/paper-trades", async (req) => {
+  const q = req.query as { symbol?: string; limit?: string };
+  const limit = q.limit ? Number(q.limit) : 50;
+  return {
+    trades: listPaperTrades({
+      symbol: q.symbol?.toUpperCase(),
+      limit: Number.isFinite(limit) ? limit : 50,
+    }),
+  };
+});
+
+app.get("/api/validation/parity", async (req) => {
+  const q = req.query as { symbol?: string };
+  const symbol = (q.symbol ?? config.symbols[0] ?? "BTCUSDT").toUpperCase();
+  return {
+    symbol,
+    exchange: config.exchange,
+    tape: tapeCoverageNote(symbol, config.exchange),
+    live: {
+      gates: { minIndependent: 2, minScore: 2, domRequiresTradeDelta: true },
+      inputs: ["structure", "mtf", "zones", "cvd", "footprint", "dom", "volumeProfile"],
+    },
+    historicalDefaultBacktest: {
+      structureOnlyMode: true,
+      inputs: ["structure", "mtf"],
+      limitation:
+        "Default /api/backtest is a structure/MTF proxy — not full live Order Flow parity. Do not claim complete-engine edge from it.",
+    },
+  };
+});
+
 app.get("/api/backtest/:symbol", async (req) => {
   const symbol = (req.params as { symbol: string }).symbol.toUpperCase();
+  const q = req.query as { feeBps?: string; slippageBps?: string };
   const adapter =
     config.exchange === "binance"
       ? new BinanceFuturesMarketDataAdapter()
       : new OkxSwapMarketDataAdapter();
-  const candles = await adapter.fetchKlines(symbol, "15m", 300);
-  const result = backtestFromCandles(symbol, candles);
+  const [primary, d1, h4, h1, m5] = await Promise.all([
+    adapter.fetchKlines(symbol, "15m", 300),
+    adapter.fetchKlines(symbol, "1d", 120),
+    adapter.fetchKlines(symbol, "4h", 180),
+    adapter.fetchKlines(symbol, "1h", 300),
+    adapter.fetchKlines(symbol, "5m", 300),
+  ]);
+  const feeBps = q.feeBps != null && Number.isFinite(Number(q.feeBps)) ? Number(q.feeBps) : 4;
+  const slippageBps =
+    q.slippageBps != null && Number.isFinite(Number(q.slippageBps)) ? Number(q.slippageBps) : 1;
+  const result = runSignalBacktest(
+    symbol,
+    primary,
+    [
+      { interval: "1d", candles: d1 },
+      { interval: "4h", candles: h4 },
+      { interval: "1h", candles: h1 },
+    ],
+    m5,
+    { feeBps, slippageBps },
+  );
   return {
+    symbol,
     ...result,
-    limitation:
-      "Historical tape/order-flow not stored yet; this backtest is structure-biased and will mostly WAIT without multi-OF confirmations.",
+    // JSON-safe Infinity
+    profitFactor:
+      result.profitFactor == null
+        ? null
+        : Number.isFinite(result.profitFactor)
+          ? result.profitFactor
+          : null,
+    profitFactorUnbounded: result.profitFactor === Number.POSITIVE_INFINITY,
   };
 });
 

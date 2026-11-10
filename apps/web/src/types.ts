@@ -111,7 +111,95 @@ export interface MarketStructureState {
   evidence: { kind: string; note: string }[];
 }
 
+export interface TimeframeStructureSummary {
+  interval: string;
+  trend: string;
+  lastBos?: { direction: string; price: number; timestamp?: number };
+  lastChoch?: { direction: string; price: number; timestamp?: number };
+}
+
+export interface MultiTimeframeContext {
+  primaryInterval: string;
+  frames: TimeframeStructureSummary[];
+  higherTfBullish: number;
+  higherTfBearish: number;
+  higherTfRange: number;
+  conflictWithPrimary: boolean;
+  updatedAt: number;
+}
+
+export interface FairValueGap {
+  id: string;
+  direction: string;
+  low: number;
+  high: number;
+  createdAt: number;
+  mitigated: boolean;
+  definition: string;
+}
+
+export interface OrderBlock {
+  id: string;
+  direction: string;
+  low: number;
+  high: number;
+  createdAt: number;
+  invalidated: boolean;
+  definition: string;
+}
+
+export interface LiquiditySweepEvent {
+  id: string;
+  side: string;
+  level: number;
+  sweepPrice: number;
+  closePrice: number;
+  timestamp: number;
+  bias: string;
+  definition: string;
+}
+
+export interface StructureZonesState {
+  symbol: string;
+  orderBlocks: OrderBlock[];
+  fairValueGaps: FairValueGap[];
+  recentSweeps: LiquiditySweepEvent[];
+  evidence: { kind: string; note: string }[];
+  updatedAt: number;
+}
+
+export interface SignalFactor {
+  id: string;
+  family: "structure" | "delta" | "orderflow" | "volume";
+  side: "long" | "short" | "neutral";
+  weight: number;
+  source: "exchange_reported" | "derived" | "heuristic";
+  reason: string;
+}
+
+export interface SignalScoreBreakdown {
+  longScore: number;
+  shortScore: number;
+  neutralScore: number;
+  independentFamilies: string[];
+  factors: SignalFactor[];
+  modelNote: string;
+}
+
+export type SignalLifecycle =
+  | "WATCHING"
+  | "PENDING_CONFIRM"
+  | "CONFIRMED"
+  | "ACTIVE"
+  | "HIT_TP"
+  | "HIT_SL"
+  | "INVALIDATED"
+  | "EXPIRED"
+  | "TIMEOUT";
+
 export interface TradingSignal {
+  id?: string;
+  setupId?: string;
   timestamp?: number;
   direction: SignalDirection;
   entry?: number;
@@ -127,6 +215,15 @@ export interface TradingSignal {
   structureOk: boolean;
   volumeOk: boolean;
   deltaOk: boolean;
+  score?: SignalScoreBreakdown;
+  evidence?: { kind: string; note: string }[];
+  /** A+ = selective checklist; STANDARD = multi-confirm only; WAIT = no setup. */
+  entryGrade?: "A+" | "STANDARD" | "WAIT";
+  entryQualityNotes?: string[];
+  lifecycle?: SignalLifecycle;
+  lifecycleUpdatedAt?: number;
+  setupOpenedAt?: number;
+  lifecycleNote?: string;
 }
 
 export interface ConnectionHealth {
@@ -136,6 +233,68 @@ export interface ConnectionHealth {
   lastError?: string;
   reconnectAttempts: number;
   symbols: string[];
+}
+
+export interface SignalSetupRow {
+  setupId: string;
+  symbol: string;
+  exchange: string;
+  direction: string;
+  lifecycle: string;
+  entry: number | null;
+  stopLoss: number | null;
+  takeProfit: number[];
+  exitPrice: number | null;
+  pnlPrice: number | null;
+  confidence: number;
+  longScore: number | null;
+  shortScore: number | null;
+  families: string[];
+  confirmations: string[];
+  lifecycleNote?: string;
+  openedAt: number;
+  updatedAt: number;
+  closedAt: number | null;
+}
+
+export interface SignalJournalMetrics {
+  setups: number;
+  directional: number;
+  hitTp: number;
+  hitSl: number;
+  invalidated: number;
+  expired: number;
+  open: number;
+  winRate: number | null;
+  avgPnlPerUnit: number | null;
+  totalPnlPerUnit: number;
+  sampleNote: string;
+}
+
+export interface BacktestResultView {
+  symbol: string;
+  trades: {
+    setupId: string;
+    entryTime: number;
+    exitTime: number;
+    side: string;
+    entry: number;
+    exit: number;
+    pnl: number;
+    fees: number;
+    outcome: string;
+  }[];
+  signalsEvaluated: number;
+  directionalSignals: number;
+  waitSignals: number;
+  winRate: number | null;
+  profitFactor: number | null;
+  profitFactorUnbounded?: boolean;
+  maxDrawdown: number;
+  averageRr: number | null;
+  expectancy: number | null;
+  totalPnl: number;
+  limitation: string;
 }
 
 export interface MarketSnapshot {
@@ -148,6 +307,8 @@ export interface MarketSnapshot {
   footprint?: FootprintBar;
   volumeProfile?: VolumeProfile;
   structure?: MarketStructureState;
+  mtf?: MultiTimeframeContext;
+  zones?: StructureZonesState;
   signal?: TradingSignal;
   recentTrades: TradeTick[];
   health: ConnectionHealth;

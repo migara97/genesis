@@ -1,4 +1,14 @@
-import type { Candle, ExecutionMode, MarketListing, OrderRecord, Position, RiskConfig } from "./types";
+import type {
+  BacktestResultView,
+  Candle,
+  ExecutionMode,
+  MarketListing,
+  OrderRecord,
+  Position,
+  RiskConfig,
+  SignalJournalMetrics,
+  SignalSetupRow,
+} from "./types";
 
 const json = async <T>(res: Response): Promise<T> => {
   if (!res.ok) {
@@ -95,4 +105,27 @@ export async function updateRisk(patch: Partial<RiskConfig>) {
       body: JSON.stringify(patch),
     }),
   );
+}
+
+export async function fetchSignalJournal(symbol?: string, limit = 20): Promise<{ setups: SignalSetupRow[] }> {
+  const search = new URLSearchParams();
+  if (symbol) search.set("symbol", symbol);
+  search.set("limit", String(limit));
+  return json(await fetch(`/api/signals/journal?${search.toString()}`));
+}
+
+export async function fetchSignalMetrics(symbol?: string): Promise<SignalJournalMetrics> {
+  const search = new URLSearchParams();
+  if (symbol) search.set("symbol", symbol);
+  return json(await fetch(`/api/signals/metrics?${search.toString()}`));
+}
+
+export async function fetchBacktest(symbol: string): Promise<BacktestResultView> {
+  return json(await fetch(`/api/backtest/${encodeURIComponent(symbol)}`));
+}
+
+export async function fetchValidationReport(symbol?: string): Promise<Record<string, unknown>> {
+  const search = new URLSearchParams();
+  if (symbol) search.set("symbol", symbol);
+  return json(await fetch(`/api/validation/report?${search.toString()}`));
 }

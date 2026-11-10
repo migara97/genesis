@@ -8,10 +8,16 @@ import {
   applyTradeToCvd,
   analyzeMarketStructure,
   buildFootprintBar,
+  buildMultiTimeframeContext,
   buildVolumeProfile,
   computeDomMetrics,
   createCvdState,
+  applySignalLifecycle,
+  detectStructureZones,
   generateSignal,
+  MTF_INTERVALS,
+  PRIMARY_INTERVAL,
+  summarizeTimeframeStructure,
 } from "@of/orderflow";
 import type {
   Candle,
@@ -21,12 +27,28 @@ import type {
   FootprintBar,
   MarketSnapshot,
   MarketStructureState,
+  MultiTimeframeContext,
   OrderBookSnapshot,
+  StructureZonesState,
   TradeTick,
   TradingSignal,
   VolumeProfile,
 } from "@of/shared";
 import { config } from "./config.js";
+import { recordSignalLifecycle } from "./signals/journal.js";
+import { syncPaperTradeFromLifecycle } from "./validation/paperLedger.js";
+import { archiveTradeTick } from "./validation/tapeArchive.js";
+
+/** Candle limits per TF — keep HTF lighter to limit REST load. */
+const MTF_CANDLE_LIMITS: Record<string, number> = {
+  "1d": 120,
+  "4h": 120,
+  "1h": 150,
+  "15m": 200,
+  "5m": 150,
+};
+/** Re-fetch MTF klines on this interval (not on every trade). */
+const MTF_REFRESH_MS = 5 * 60_000;
 
 function createMarketAdapter(): ExchangeMarketDataAdapter {
   if (config.exchange === "binance") return new BinanceFuturesMarketDataAdapter();
@@ -45,9 +67,14 @@ interface SymbolState {
   volumeProfile?: VolumeProfile;
   structure?: MarketStructureState;
   candles: Candle[];
+  /** Candles keyed by interval for Phase-4 MTF. */
+  candlesByInterval: Map<string, Candle[]>;
+  mtf?: MultiTimeframeContext;
+  zones?: StructureZonesState;
   signal?: TradingSignal;
   lastPrice: number;
   health: ConnectionHealth;
+  mtfRefreshTimer?: NodeJS.Timeout;
 }
 
 /**
@@ -76,6 +103,7 @@ export class MarketHub extends EventEmitter {
         footprintBuffer: [],
         footprintOpen: Date.now(),
         candles: [],
+        candlesByInterval: new Map(),
         lastPrice: 0,
         health: {
           exchange: this.adapter.id,
@@ -116,7 +144,11 @@ export class MarketHub extends EventEmitter {
     }
     if (gen !== this.generation) return;
     for (const key of [...this.states.keys()]) {
-      if (key !== normalized) this.states.delete(key);
+      if (key !== normalized) {
+        const stale = this.states.get(key);
+        if (stale?.mtfRefreshTimer) clearInterval(stale.mtfRefreshTimer);
+        this.states.delete(key);
+      }
     }
     for (const key of [...this.snapshotTimers.keys()]) {
       if (key !== normalized) {
@@ -142,23 +174,13 @@ export class MarketHub extends EventEmitter {
       for (const symbol of symbols) {
         if (gen !== this.generation) return;
         try {
-          const candles = await this.adapter.fetchKlines(symbol, "15m", 200);
-          const prevDay = await this.adapter.fetchKlines(symbol, "1d", 2);
-          const prev = prevDay[0];
+          await this.loadMultiTimeframe(symbol);
           const state = this.states.get(symbol)!;
-          state.candles = candles;
-          state.lastPrice = candles[candles.length - 1]?.close ?? 0;
-          state.structure = analyzeMarketStructure(
-            symbol,
-            candles,
-            3,
-            prev?.high,
-            prev?.low,
-          );
           state.health = {
             ...state.health,
             lastError: undefined,
           };
+          this.scheduleMtfRefresh(symbol);
           this.recomputeProfile(symbol);
           this.recomputeSignal(symbol);
         } catch (err) {
@@ -212,6 +234,8 @@ export class MarketHub extends EventEmitter {
       footprint: s.footprint,
       volumeProfile: s.volumeProfile,
       structure: s.structure,
+      mtf: s.mtf,
+      zones: s.zones,
       signal: s.signal,
       recentTrades: s.trades.slice(-80),
       health: s.health,
@@ -227,6 +251,7 @@ export class MarketHub extends EventEmitter {
   private onTrade(trade: TradeTick): void {
     const state = this.states.get(trade.symbol);
     if (!state) return;
+    archiveTradeTick(trade);
     state.lastPrice = trade.price;
     state.trades.push(trade);
     if (state.trades.length > 500) state.trades.splice(0, state.trades.length - 500);
@@ -310,21 +335,123 @@ export class MarketHub extends EventEmitter {
       state.structure?.previousSessionHigh,
       state.structure?.previousSessionLow,
     );
+    state.zones = detectStructureZones(symbol, state.candles);
+    this.recomputeMtfFromCache(symbol);
+  }
+
+  private async loadMultiTimeframe(symbol: string): Promise<void> {
+    const state = this.states.get(symbol);
+    if (!state) return;
+    const frames = [];
+    for (const interval of MTF_INTERVALS) {
+      const limit = MTF_CANDLE_LIMITS[interval] ?? 150;
+      const candles = await this.adapter.fetchKlines(symbol, interval, limit);
+      state.candlesByInterval.set(interval, candles);
+      if (interval === PRIMARY_INTERVAL) {
+        state.candles = candles;
+        state.lastPrice = candles[candles.length - 1]?.close ?? state.lastPrice;
+      }
+      const structure = analyzeMarketStructure(symbol, candles, 3);
+      frames.push(summarizeTimeframeStructure(interval, structure));
+    }
+    const dayCandles = state.candlesByInterval.get("1d") ?? [];
+    const prev = dayCandles.length >= 2 ? dayCandles[dayCandles.length - 2] : dayCandles[0];
+    state.structure = analyzeMarketStructure(
+      symbol,
+      state.candles,
+      3,
+      prev?.high,
+      prev?.low,
+    );
+    // Refresh primary frame with session levels attached to structure trend.
+    const primaryIdx = frames.findIndex((f) => f.interval === PRIMARY_INTERVAL);
+    if (primaryIdx >= 0 && state.structure) {
+      frames[primaryIdx] = summarizeTimeframeStructure(PRIMARY_INTERVAL, state.structure);
+    }
+    state.mtf = buildMultiTimeframeContext(frames, PRIMARY_INTERVAL, Date.now());
+    state.zones = detectStructureZones(symbol, state.candles);
+  }
+
+  private recomputeMtfFromCache(symbol: string): void {
+    const state = this.states.get(symbol);
+    if (!state || state.candlesByInterval.size === 0) return;
+    const frames = [];
+    for (const interval of MTF_INTERVALS) {
+      const candles = state.candlesByInterval.get(interval);
+      if (!candles?.length) continue;
+      if (interval === PRIMARY_INTERVAL) {
+        frames.push(
+          summarizeTimeframeStructure(
+            interval,
+            state.structure ?? analyzeMarketStructure(symbol, candles, 3),
+          ),
+        );
+      } else {
+        frames.push(
+          summarizeTimeframeStructure(interval, analyzeMarketStructure(symbol, candles, 3)),
+        );
+      }
+    }
+    if (frames.length === 0) return;
+    state.mtf = buildMultiTimeframeContext(frames, PRIMARY_INTERVAL, Date.now());
+  }
+
+  private scheduleMtfRefresh(symbol: string): void {
+    const state = this.states.get(symbol);
+    if (!state) return;
+    if (state.mtfRefreshTimer) clearInterval(state.mtfRefreshTimer);
+    state.mtfRefreshTimer = setInterval(() => {
+      void this.loadMultiTimeframe(symbol)
+        .then(() => {
+          this.recomputeSignal(symbol);
+          this.publish(symbol);
+        })
+        .catch((err) => this.emit("error", err));
+    }, MTF_REFRESH_MS);
   }
 
   private recomputeSignal(symbol: string): void {
     const state = this.states.get(symbol);
     if (!state || !state.lastPrice) return;
-    state.signal = generateSignal({
+    const now = Date.now();
+    const previous = state.signal;
+    const candidate = generateSignal({
       symbol,
       lastPrice: state.lastPrice,
-      timestamp: Date.now(),
+      timestamp: now,
       footprint: state.footprint,
       cvd: state.cvd,
       dom: state.dom,
       volumeProfile: state.volumeProfile,
       structure: state.structure,
+      mtf: state.mtf,
+      zones: state.zones,
     });
+    state.signal = applySignalLifecycle(previous, candidate, state.lastPrice, now);
+    try {
+      recordSignalLifecycle(previous, state.signal, state.lastPrice, config.exchange);
+      syncPaperTradeFromLifecycle({
+        previous,
+        next: state.signal,
+        price: state.lastPrice,
+        exchange: config.exchange,
+        candles: state.candles,
+        structureTrend: state.structure?.trend,
+        ofSnapshot: {
+          cvd: state.cvd?.cvd,
+          footprintDelta: state.footprint?.totalDelta,
+          domImbalance: state.dom?.imbalance,
+          poc: state.volumeProfile?.poc,
+          vah: state.volumeProfile?.vah,
+          val: state.volumeProfile?.val,
+          mtfSummary: state.mtf
+            ? `${state.mtf.higherTfBullish}b/${state.mtf.higherTfBearish}s conf=${state.mtf.conflictWithPrimary}`
+            : undefined,
+        },
+      });
+    } catch (err) {
+      this.emit("error", err);
+    }
   }
 }
 

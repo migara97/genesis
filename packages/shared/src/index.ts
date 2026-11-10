@@ -167,8 +167,182 @@ export interface MarketStructureState {
   evidence: EvidenceTag[];
 }
 
+/** Compact per-timeframe structure summary for Phase-4 MTF alignment. */
+export interface TimeframeStructureSummary {
+  interval: string;
+  trend: "bullish" | "bearish" | "range";
+  lastBos?: { direction: "bullish" | "bearish"; price: number; timestamp: number };
+  lastChoch?: { direction: "bullish" | "bearish"; price: number; timestamp: number };
+}
+
+/**
+ * Multi-timeframe context. Higher TFs (1d/4h/1h) confirm or conflict with
+ * the primary (15m) structure bias. Trends are derived from candle swings.
+ */
+export interface MultiTimeframeContext {
+  primaryInterval: string;
+  frames: TimeframeStructureSummary[];
+  higherTfBullish: number;
+  higherTfBearish: number;
+  higherTfRange: number;
+  /** True when primary trend is directional and majority HTF opposes it. */
+  conflictWithPrimary: boolean;
+  updatedAt: number;
+}
+
+/**
+ * Phase-6 price zones. All fields are rule-derived heuristics from OHLC —
+ * not exchange labels and not proof of "institutional" intent.
+ */
+export interface FairValueGap {
+  id: string;
+  direction: "bullish" | "bearish";
+  low: number;
+  high: number;
+  createdAt: number;
+  mitigated: boolean;
+  /** Exact mechanical rule used to create this gap. */
+  definition: string;
+}
+
+export interface OrderBlock {
+  id: string;
+  direction: "bullish" | "bearish";
+  low: number;
+  high: number;
+  createdAt: number;
+  invalidated: boolean;
+  definition: string;
+}
+
+export interface LiquiditySweepEvent {
+  id: string;
+  side: "BSL" | "SSL";
+  level: number;
+  sweepPrice: number;
+  closePrice: number;
+  timestamp: number;
+  /** SSL reclaim → bullish bias; BSL reclaim → bearish bias (rule only). */
+  bias: "bullish" | "bearish";
+  definition: string;
+}
+
+export interface StructureZonesState {
+  symbol: string;
+  orderBlocks: OrderBlock[];
+  fairValueGaps: FairValueGap[];
+  recentSweeps: LiquiditySweepEvent[];
+  evidence: EvidenceTag[];
+  updatedAt: number;
+}
+
+export type SignalFactorSource = "exchange_reported" | "derived" | "heuristic";
+export type SignalFactorFamily = "structure" | "delta" | "orderflow" | "volume";
+
+/** One scored contribution inside the Phase-1 explainable model. */
+export interface SignalFactor {
+  id: string;
+  family: SignalFactorFamily;
+  side: "long" | "short" | "neutral";
+  weight: number;
+  source: SignalFactorSource;
+  reason: string;
+}
+
+/**
+ * Transparent score snapshot. Weights are configurable model parameters —
+ * not a statistically proven edge or calibrated win probability.
+ */
+export interface SignalScoreBreakdown {
+  longScore: number;
+  shortScore: number;
+  neutralScore: number;
+  independentFamilies: SignalFactorFamily[];
+  factors: SignalFactor[];
+  modelNote: string;
+}
+
+/**
+ * Signal lifecycle. Terminal states are held briefly to suppress duplicate
+ * re-alerts. Phase-7: TIMEOUT = age/max-hold expiry; EXPIRED kept for
+ * backward-compatible journal rows / generic expiry.
+ */
+export type SignalLifecycle =
+  | "WATCHING"
+  | "PENDING_CONFIRM"
+  | "CONFIRMED"
+  | "ACTIVE"
+  | "HIT_TP"
+  | "HIT_SL"
+  | "INVALIDATED"
+  | "EXPIRED"
+  | "TIMEOUT";
+
+/** Forward-paper / validation outcome (measurement layer — not a signal gate). */
+export type PaperOutcome =
+  | "OPEN"
+  | "HIT_TP"
+  | "HIT_SL"
+  | "INVALIDATED"
+  | "EXPIRED"
+  | "TIMEOUT"
+  | "PARTIAL_TP";
+
+export type MarketRegimeTag =
+  | "bullish_trend"
+  | "bearish_trend"
+  | "sideways"
+  | "high_volatility"
+  | "low_volatility"
+  | "high_volume"
+  | "low_volume"
+  | "unknown";
+
+/**
+ * Frozen snapshot at paper-trade open. Preserves what the engine saw —
+ * does not re-score later.
+ */
+export interface PaperTradeSnapshot {
+  signalId: string;
+  setupId: string;
+  symbol: string;
+  exchange: string;
+  marketType: "futures_perp" | "spot";
+  pair: string;
+  direction: "LONG" | "SHORT";
+  generatedAt: number;
+  primaryTimeframe: string;
+  entry: number;
+  stopLoss: number;
+  takeProfit: number[];
+  confidence: number;
+  longScore: number;
+  shortScore: number;
+  families: string[];
+  confirmations: string[];
+  factors: { id: string; family: string; side: string; weight: number; source: string }[];
+  orderFlowOk: boolean;
+  structureOk: boolean;
+  volumeOk: boolean;
+  deltaOk: boolean;
+  regimeTags: MarketRegimeTag[];
+  engineVersion: string;
+  configVersion: string;
+  ofSnapshot?: {
+    cvd?: number;
+    footprintDelta?: number;
+    domImbalance?: number;
+    poc?: number;
+    vah?: number;
+    val?: number;
+    mtfSummary?: string;
+  };
+}
+
 export interface TradingSignal {
   id: string;
+  /** Stable id for the same symbol/direction/confirmation family set (Phase 1). */
+  setupId: string;
   symbol: string;
   timestamp: number;
   direction: SignalDirection;
@@ -176,6 +350,10 @@ export interface TradingSignal {
   stopLoss?: number;
   takeProfit?: number[];
   riskReward?: number;
+  /**
+   * Model confidence in [0,1]. Not a historical win rate.
+   * WAIT signals are capped lower by design.
+   */
   confidence: number;
   confirmations: string[];
   reasonsFor: string[];
@@ -185,6 +363,21 @@ export interface TradingSignal {
   structureOk: boolean;
   volumeOk: boolean;
   deltaOk: boolean;
+  score: SignalScoreBreakdown;
+  evidence: EvidenceTag[];
+  /**
+   * Entry quality grade. A+ = stricter selective profile (not a win-rate claim).
+   * STANDARD = legacy multi-confirm gates only. WAIT when no directional setup.
+   */
+  entryGrade: "A+" | "STANDARD" | "WAIT";
+  /** Checklist notes when A+ filters pass or demote a setup to WAIT. */
+  entryQualityNotes?: string[];
+  /** Phase 2 lifecycle status. */
+  lifecycle: SignalLifecycle;
+  lifecycleUpdatedAt: number;
+  /** When this setupId first entered a non-watching state. */
+  setupOpenedAt: number;
+  lifecycleNote?: string;
 }
 
 export interface RiskConfig {
@@ -263,6 +456,10 @@ export interface MarketSnapshot {
   footprint?: FootprintBar;
   volumeProfile?: VolumeProfile;
   structure?: MarketStructureState;
+  /** Phase 4 multi-timeframe structure summaries. */
+  mtf?: MultiTimeframeContext;
+  /** Phase 6 OB / FVG / sweep zones (rule-derived). */
+  zones?: StructureZonesState;
   signal?: TradingSignal;
   recentTrades: TradeTick[];
   health: ConnectionHealth;

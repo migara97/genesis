@@ -1,4 +1,16 @@
-import type { Candle, MarketStructureState, SwingPoint } from "@of/shared";
+import type {
+  Candle,
+  MarketStructureState,
+  MultiTimeframeContext,
+  SwingPoint,
+  TimeframeStructureSummary,
+} from "@of/shared";
+
+/** Higher timeframes used for Phase-4 confirmation (excludes primary 15m and 5m). */
+export const HIGHER_TIMEFRAMES = ["1d", "4h", "1h"] as const;
+/** Full MTF set: HTF + primary + soft LTF confirm. */
+export const MTF_INTERVALS = ["1d", "4h", "1h", "15m", "5m"] as const;
+export const PRIMARY_INTERVAL = "15m";
 
 export function analyzeMarketStructure(
   symbol: string,
@@ -132,4 +144,61 @@ function detectBosChoch(swings: SwingPoint[]): Pick<
 
 function uniqueSorted(values: number[]): number[] {
   return [...new Set(values.map((v) => Number(v.toPrecision(10))))].sort((a, b) => a - b);
+}
+
+export function summarizeTimeframeStructure(
+  interval: string,
+  structure: Pick<MarketStructureState, "trend" | "lastBos" | "lastChoch">,
+): TimeframeStructureSummary {
+  return {
+    interval,
+    trend: structure.trend,
+    lastBos: structure.lastBos,
+    lastChoch: structure.lastChoch,
+  };
+}
+
+/**
+ * Build multi-timeframe alignment context from per-interval structure summaries.
+ * Conflict = primary is directional and a majority of non-range HTFs oppose it.
+ */
+export function buildMultiTimeframeContext(
+  frames: TimeframeStructureSummary[],
+  primaryInterval = PRIMARY_INTERVAL,
+  updatedAt = Date.now(),
+): MultiTimeframeContext {
+  const primary = frames.find((f) => f.interval === primaryInterval);
+  const higher = frames.filter((f) => (HIGHER_TIMEFRAMES as readonly string[]).includes(f.interval));
+  let higherTfBullish = 0;
+  let higherTfBearish = 0;
+  let higherTfRange = 0;
+  for (const frame of higher) {
+    if (frame.trend === "bullish") higherTfBullish += 1;
+    else if (frame.trend === "bearish") higherTfBearish += 1;
+    else higherTfRange += 1;
+  }
+
+  const directionalHtf = higherTfBullish + higherTfBearish;
+  let conflictWithPrimary = false;
+  if (primary?.trend === "bullish" && directionalHtf > 0 && higherTfBearish > higherTfBullish) {
+    conflictWithPrimary = true;
+  } else if (primary?.trend === "bearish" && directionalHtf > 0 && higherTfBullish > higherTfBearish) {
+    conflictWithPrimary = true;
+  }
+
+  return {
+    primaryInterval,
+    frames: [...frames].sort((a, b) => intervalRank(a.interval) - intervalRank(b.interval)),
+    higherTfBullish,
+    higherTfBearish,
+    higherTfRange,
+    conflictWithPrimary,
+    updatedAt,
+  };
+}
+
+function intervalRank(interval: string): number {
+  const order = ["1d", "4h", "1h", "15m", "5m", "1m"];
+  const idx = order.indexOf(interval);
+  return idx >= 0 ? idx : 99;
 }
