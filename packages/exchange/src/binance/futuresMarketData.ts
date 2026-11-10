@@ -3,7 +3,12 @@ import type { Candle, ConnectionHealth, OrderBookSnapshot, TradeTick } from "@of
 import type { ExchangeMarketDataAdapter, MarketDataHandlers } from "../types.js";
 
 const REST = "https://fapi.binance.com";
-const WS = "wss://fstream.binance.com";
+/** Some networks accept fstream.binance.com but drop @aggTrade while depth still flows. */
+const WS_HOSTS = [
+  "wss://fstream.binancefuture.com",
+  "wss://fstream.binance.com",
+] as const;
+const TRADE_WATCHDOG_MS = 8_000;
 
 interface DepthEvent {
   e: string;
@@ -42,6 +47,9 @@ export class BinanceFuturesMarketDataAdapter implements ExchangeMarketDataAdapte
   private reconnectTimer: NodeJS.Timeout | null = null;
   private books = new Map<string, LocalBook>();
   private connId = 0;
+  private wsHostIndex = 0;
+  private lastTradeAt = 0;
+  private tradeWatchdog: NodeJS.Timeout | null = null;
   private health: ConnectionHealth = {
     exchange: this.id,
     connected: false,
@@ -60,6 +68,7 @@ export class BinanceFuturesMarketDataAdapter implements ExchangeMarketDataAdapte
     this.connId += 1;
     this.shouldRun = false;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.clearTradeWatchdog();
     this.ws?.close();
     this.ws = null;
     this.health = { ...this.health, connected: false };
@@ -109,13 +118,16 @@ export class BinanceFuturesMarketDataAdapter implements ExchangeMarketDataAdapte
 
   private async openSocket(): Promise<void> {
     const connId = ++this.connId;
+    const host = WS_HOSTS[this.wsHostIndex % WS_HOSTS.length]!;
     const streams = this.symbols
       .flatMap((s) => {
         const id = s.toLowerCase();
         return [`${id}@aggTrade`, `${id}@depth@100ms`];
       })
       .join("/");
-    const url = `${WS}/stream?streams=${streams}`;
+    const url = `${host}/stream?streams=${streams}`;
+    this.lastTradeAt = 0;
+    this.clearTradeWatchdog();
     await new Promise<void>((resolve, reject) => {
       const ws = new WebSocket(url);
       this.ws = ws;
@@ -135,6 +147,7 @@ export class BinanceFuturesMarketDataAdapter implements ExchangeMarketDataAdapte
           lastMessageAt: Date.now(),
         };
         this.emitHealth();
+        this.armTradeWatchdog(connId);
         void this.bootstrapBooks().catch((err) => this.handlers?.onError?.(err as Error));
         if (!settled) {
           settled = true;
@@ -159,6 +172,7 @@ export class BinanceFuturesMarketDataAdapter implements ExchangeMarketDataAdapte
 
       ws.on("close", () => {
         if (connId !== this.connId) return;
+        this.clearTradeWatchdog();
         this.health = { ...this.health, connected: false };
         this.emitHealth();
         if (this.shouldRun) this.scheduleReconnect();
@@ -166,14 +180,43 @@ export class BinanceFuturesMarketDataAdapter implements ExchangeMarketDataAdapte
     });
   }
 
-  private scheduleReconnect(): void {
+  private scheduleReconnect(rotateHost = false): void {
     this.reconnectAttempts += 1;
+    if (rotateHost) this.wsHostIndex = (this.wsHostIndex + 1) % WS_HOSTS.length;
     const delay = Math.min(30_000, 1000 * 2 ** Math.min(this.reconnectAttempts, 5));
     this.health = { ...this.health, reconnectAttempts: this.reconnectAttempts };
     this.emitHealth();
     this.reconnectTimer = setTimeout(() => {
       void this.openSocket().catch((err) => this.handlers?.onError?.(err as Error));
     }, delay);
+  }
+
+  private armTradeWatchdog(connId: number): void {
+    this.clearTradeWatchdog();
+    this.tradeWatchdog = setTimeout(() => {
+      if (connId !== this.connId || !this.shouldRun) return;
+      if (this.lastTradeAt > 0) return;
+      const host = WS_HOSTS[this.wsHostIndex % WS_HOSTS.length];
+      const err = new Error(
+        `No aggTrade messages from ${host} within ${TRADE_WATCHDOG_MS}ms; rotating Futures WS host`,
+      );
+      this.health = { ...this.health, lastError: err.message };
+      this.emitHealth();
+      this.handlers?.onError?.(err);
+      this.wsHostIndex = (this.wsHostIndex + 1) % WS_HOSTS.length;
+      this.connId += 1;
+      this.clearTradeWatchdog();
+      this.ws?.close();
+      this.ws = null;
+      this.scheduleReconnect(false);
+    }, TRADE_WATCHDOG_MS);
+  }
+
+  private clearTradeWatchdog(): void {
+    if (this.tradeWatchdog) {
+      clearTimeout(this.tradeWatchdog);
+      this.tradeWatchdog = null;
+    }
   }
 
   private async bootstrapBooks(): Promise<void> {
@@ -202,6 +245,8 @@ export class BinanceFuturesMarketDataAdapter implements ExchangeMarketDataAdapte
   }
 
   private handleTrade(ev: AggTradeEvent): void {
+    this.lastTradeAt = Date.now();
+    this.clearTradeWatchdog();
     // m = buyer is maker => seller was aggressor
     const buyerAggressor = !ev.m;
     const trade: TradeTick = {
