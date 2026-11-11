@@ -62,6 +62,11 @@ export default function App() {
     if (!pinned && !symbol && symbols[0]) setSymbol(symbols[0]);
   }, [pinned, symbol, symbols]);
 
+  // Keep desk symbol in sync with the focused stream once WS snapshots arrive.
+  useEffect(() => {
+    if (!symbol && snap?.symbol) setSymbol(snap.symbol);
+  }, [symbol, snap?.symbol]);
+
   const selectSymbol = (next: string) => {
     setPinned(true);
     setSymbol(next);
@@ -164,11 +169,13 @@ export default function App() {
         </button>
       </header>
 
-      <Markets selected={symbol} onSelect={selectSymbol} />
-      <ScannerPanel selected={symbol} onSelect={selectSymbol} />
+      <div className="desk-strip">
+        <Markets selected={symbol} onSelect={selectSymbol} />
+        <ScannerPanel selected={symbol} onSelect={selectSymbol} />
+      </div>
 
       <main className="layout">
-        <section className="panel" style={{ gridRow: "1 / 3" }}>
+        <section className="panel cell-dom">
           <h3>Order Book / DOM</h3>
           <div className="panel-body">
             <div className="kv" style={{ marginBottom: 8 }}>
@@ -208,21 +215,7 @@ export default function App() {
           </div>
         </section>
 
-        <section className="panel of-fill">
-          <h3>Footprint (session bar)</h3>
-          <div className="panel-body">
-            <FootprintBoard bar={snap?.footprint} sessionCvd={snap?.cvd?.cvd} />
-          </div>
-        </section>
-
-        <section className="panel of-fill">
-          <h3>Signal Engine</h3>
-          <div className="panel-body">
-            <SignalBoard signal={snap?.signal} symbol={snap?.symbol} cvd={snap?.cvd} footprint={snap?.footprint} structure={snap?.structure} mtf={snap?.mtf} zones={snap?.zones} breakRetest={snap?.breakRetest} scenarios={snap?.scenarios} />
-          </div>
-        </section>
-
-        <section className="panel" style={{ gridRow: "1 / 3" }}>
+        <section className="panel cell-exec">
           <h3>Execution / Risk</h3>
           <div className="panel-body">
             <div className="desk-block">
@@ -247,7 +240,7 @@ export default function App() {
             </div>
             </div>
             {statusMsg && <div className="status-line">{statusMsg}</div>}
-            {error && <div className="signal-short">{error}</div>}
+            {error && !connected && <div className="signal-short">{error}</div>}
             <div className="desk-block">
               <div className="desk-kicker">Signal plan</div>
               <div className="metric-grid">
@@ -320,48 +313,82 @@ export default function App() {
           </div>
         </section>
 
-        <section className="panel of-fill">
-          <h3>CVD</h3>
-          <div className="panel-body">
-            <CvdBoard
-              cvd={snap?.cvd}
-              symbol={symbol}
-              overlay={snap?.chartOverlay}
-              breakRetest={snap?.breakRetest}
-              structureTargets={snap?.signal?.structureTargets}
-              scenarios={snap?.scenarios}
-              primaryInterval={snap?.primaryInterval ?? primaryInterval}
-            />
-          </div>
-        </section>
+        <div className="stack cell-ofstack">
+          <section className="panel of-fill">
+            <h3>Footprint (session bar)</h3>
+            <div className="panel-body">
+              <FootprintBoard bar={snap?.footprint} sessionCvd={snap?.cvd?.cvd} />
+            </div>
+          </section>
+          <section className="panel of-fill">
+            <h3>CVD</h3>
+            <div className="panel-body">
+              <CvdBoard
+                cvd={snap?.cvd}
+                symbol={symbol}
+                overlay={snap?.chartOverlay}
+                breakRetest={snap?.breakRetest}
+                structureTargets={snap?.signal?.structureTargets}
+                scenarios={snap?.scenarios}
+                primaryInterval={snap?.primaryInterval ?? primaryInterval}
+              />
+            </div>
+          </section>
+        </div>
 
-        <section className="panel of-fill">
-          <h3>Volume Profile / Structure</h3>
-          <div className="panel-body">
-            <StructureBoard profile={snap?.volumeProfile} structure={snap?.structure} lastPrice={snap?.lastPrice} />
-          </div>
-        </section>
+        <div className="stack cell-sigstack">
+          <section className="panel of-fill">
+            <h3>Signal Engine</h3>
+            <div className="panel-body">
+              <SignalBoard
+                signal={snap?.signal}
+                symbol={snap?.symbol}
+                cvd={snap?.cvd}
+                footprint={snap?.footprint}
+                structure={snap?.structure}
+                mtf={snap?.mtf}
+                zones={snap?.zones}
+                breakRetest={snap?.breakRetest}
+                scenarios={snap?.scenarios}
+              />
+            </div>
+          </section>
+          <section className="panel of-fill">
+            <h3>Volume Profile / Structure</h3>
+            <div className="panel-body">
+              <StructureBoard
+                profile={snap?.volumeProfile}
+                structure={snap?.structure}
+                lastPrice={snap?.lastPrice}
+              />
+            </div>
+          </section>
+        </div>
 
-        <section className="panel">
+        <section className="panel cell-tape">
           <h3>Time & Sales</h3>
           <div className="panel-body tape">
-            {(snap?.recentTrades ?? [])
-              .slice()
-              .reverse()
-              .slice(0, 40)
-              .map((t) => (
-                <div className="row" key={t.tradeId + t.timestamp}>
-                  <span className={t.buyerAggressor ? "buy" : "sell"}>
-                    {t.buyerAggressor ? "BUY" : "SELL"}
-                  </span>
-                  <span>{fmt(t.price)}</span>
-                  <span>{fmtQty(t.quantity)}</span>
-                </div>
-              ))}
+            {(snap?.recentTrades ?? []).length === 0 ? (
+              <p className="disclaimer">Waiting for trades…</p>
+            ) : (
+              (snap?.recentTrades ?? [])
+                .slice()
+                .reverse()
+                .slice(0, 40)
+                .map((t) => (
+                  <div className="row" key={t.tradeId + t.timestamp}>
+                    <span className={t.buyerAggressor ? "buy" : "sell"}>
+                      {t.buyerAggressor ? "BUY" : "SELL"}
+                    </span>
+                    <span>{fmt(t.price)}</span>
+                    <span>{fmtQty(t.quantity)}</span>
+                  </div>
+                ))
+            )}
           </div>
         </section>
 
-        <section className="panel" style={{ gridColumn: "1 / 3", gridRow: "4", minHeight: 220 }}>
+        <section className="panel cell-positions">
           <h3>Open Positions</h3>
           <div className="panel-body">
             <table className="table">
@@ -393,7 +420,7 @@ export default function App() {
           </div>
         </section>
 
-        <section className="panel" style={{ gridColumn: "3 / 5", gridRow: "4", minHeight: 220 }}>
+        <section className="panel cell-orders">
           <h3>Order History</h3>
           <div className="panel-body">
             <table className="table">

@@ -20,6 +20,7 @@ export function Markets({ selected, onSelect }: Props) {
 
   useEffect(() => {
     let cancel = false;
+    let timer: number | undefined;
     const load = () => {
       void fetchMarkets({ q, quote, status, sort, favorites })
         .then((page) => {
@@ -34,12 +35,13 @@ export function Markets({ selected, onSelect }: Props) {
         });
     };
     load();
-    const timer = window.setInterval(load, 20_000);
+    // Retry sooner while the catalog is still empty (startup sync race).
+    timer = window.setInterval(load, items.length ? 20_000 : 3_000);
     return () => {
       cancel = true;
-      window.clearInterval(timer);
+      if (timer) window.clearInterval(timer);
     };
-  }, [q, quote, status, sort, favorites]);
+  }, [q, quote, status, sort, favorites, items.length === 0]);
 
   const toggleFavorite = async (row: MarketListing) => {
     const next = !row.favorite;

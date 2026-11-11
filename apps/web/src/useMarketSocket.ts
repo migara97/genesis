@@ -65,7 +65,10 @@ export function useMarketSocket() {
         retryRef.current += 1;
         timer = window.setTimeout(connect, delay);
       };
-      ws.onerror = () => setError("WebSocket error");
+      // Browser fires error before close on proxy blips; don't sticky-lock the banner.
+      ws.onerror = () => {
+        if (!closed) setError("WebSocket reconnecting…");
+      };
       ws.onmessage = (ev) => {
         try {
           const msg = JSON.parse(ev.data as string) as {
@@ -75,14 +78,32 @@ export function useMarketSocket() {
           if (msg.type === "hello") {
             const payload = msg.payload as {
               snapshots: MarketSnapshot[];
+              symbols?: string[];
             };
             const map: Record<string, MarketSnapshot> = {};
             for (const s of payload.snapshots ?? []) map[s.symbol] = s;
             setSnapshots(map);
+            const first =
+              symbolRef.current ??
+              payload.snapshots?.[0]?.symbol ??
+              payload.symbols?.[0] ??
+              null;
+            if (first && !symbolRef.current) {
+              symbolRef.current = first;
+              ws?.send(
+                JSON.stringify({
+                  type: "subscribe",
+                  symbol: first,
+                  primaryInterval: primaryRef.current,
+                }),
+              );
+            }
+            if (payload.snapshots?.[0]?.health) setHealth(payload.snapshots[0].health);
           } else if (msg.type === "snapshot") {
             const snap = msg.payload as MarketSnapshot;
             setSnapshots({ [snap.symbol]: snap });
             setHealth(snap.health);
+            setError(null);
           } else if (msg.type === "health") {
             setHealth(msg.payload as ConnectionHealth);
           } else if (msg.type === "error") {

@@ -25,12 +25,13 @@ export function ScannerPanel({ selected, onSelect }: Props) {
         });
     };
     load();
-    const timer = window.setInterval(load, 20_000);
+    const empty = (snap?.hits?.length ?? 0) === 0;
+    const timer = window.setInterval(load, empty ? 3_000 : 20_000);
     return () => {
       cancel = true;
       window.clearInterval(timer);
     };
-  }, []);
+  }, [snap?.hits?.length ?? 0]);
 
   return (
     <section className="markets scanner-panel">

@@ -71,8 +71,20 @@ select {
 
 .app {
   display: grid;
-  grid-template-rows: 52px minmax(200px, 32vh) minmax(0, 1fr);
+  grid-template-rows: 52px minmax(140px, 20vh) minmax(0, 1fr);
   height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.desk-strip {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(280px, 0.9fr);
+  gap: 8px;
+  min-height: 0;
+  overflow: hidden;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
 }
 
 .topbar {
@@ -124,12 +136,31 @@ select {
 
 .layout {
   display: grid;
-  grid-template-columns: 280px 1.4fr 320px 300px;
-  grid-template-rows: max-content max-content 220px 220px;
+  grid-template-columns: minmax(200px, 240px) minmax(0, 1.2fr) minmax(280px, 1fr) minmax(280px, 1fr);
+  grid-template-rows: minmax(320px, 1fr) minmax(88px, 100px);
+  grid-template-areas:
+    "dom exec ofstack sigstack"
+    "tape positions orders orders";
   gap: 8px;
   padding: 8px;
   min-height: 0;
-  overflow: auto;
+  overflow: hidden;
+}
+
+.cell-dom { grid-area: dom; }
+.cell-exec { grid-area: exec; }
+.cell-ofstack { grid-area: ofstack; }
+.cell-sigstack { grid-area: sigstack; }
+.cell-tape { grid-area: tape; }
+.cell-positions { grid-area: positions; }
+.cell-orders { grid-area: orders; }
+
+.stack {
+  min-height: 0;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 8px;
+  overflow: hidden;
 }
 
 .panel {
@@ -137,6 +168,7 @@ select {
   border: 1px solid var(--border);
   border-radius: 6px;
   min-height: 0;
+  max-height: 100%;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -222,9 +254,30 @@ select {
   background: rgba(14, 203, 129, 0.7);
 }
 
+.cell-tape .panel-body,
+.cell-positions .panel-body,
+.cell-orders .panel-body {
+  padding: 4px 8px;
+}
+
+.cell-tape h3,
+.cell-positions h3,
+.cell-orders h3 {
+  padding: 5px 8px;
+  font-size: 11px;
+}
+
+.cell-positions .table th,
+.cell-orders .table th,
+.cell-positions .table td,
+.cell-orders .table td {
+  padding: 2px 6px;
+  font-size: 11px;
+}
+
 .tape {
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: 11px;
 }
 
 .tape .buy {
@@ -295,7 +348,32 @@ select {
 
 .desk-block + .desk-block,
 .desk-block {
-  margin-bottom: 12px;
+  margin-bottom: 10px;
+}
+
+.cell-exec .panel-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow: auto;
+}
+
+.cell-exec .desk-block {
+  margin-bottom: 0;
+  flex: 0 0 auto;
+}
+
+.cell-exec .desk-block:first-child {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--bg-panel);
+  padding-bottom: 4px;
+}
+
+.cell-exec .trade-actions {
+  margin-top: 10px;
+  flex-shrink: 0;
 }
 
 .desk-kicker {
@@ -344,11 +422,22 @@ select {
   grid-template-columns: 1fr 1fr;
   gap: 8px;
   margin-top: 8px;
+  align-items: stretch;
 }
 
 .trade-actions button {
-  min-height: 36px;
+  box-sizing: border-box;
+  min-height: 40px;
+  height: 40px;
+  width: 100%;
+  flex: 1 1 0;
   font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px 12px;
+  overflow: visible;
+  line-height: 1.2;
 }
 
 .metric-grid,
@@ -662,26 +751,25 @@ select {
 }
 
 .of-fill {
-  height: auto;
-  min-height: min-content;
-  align-self: start;
-  overflow: auto;
+  min-height: 0;
+  align-self: stretch;
+  overflow: hidden;
 }
 
 .of-fill > .panel-body {
   display: flex;
   flex-direction: column;
-  overflow: visible;
-  height: auto;
-  flex: none;
+  overflow: auto;
+  flex: 1;
+  min-height: 0;
   padding: 6px 8px;
 }
 
 .of-fill .detail-board {
   display: flex;
   flex-direction: column;
-  flex: none;
-  height: auto;
+  flex: 1 1 auto;
+  min-height: 0;
   gap: 6px;
   overflow: visible;
 }
@@ -715,6 +803,20 @@ select {
 .of-fill .signal-banner {
   padding: 2px 8px;
   align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.of-fill .of-head .chip-row {
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.of-fill .chip {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .of-fill .metric span,
@@ -739,17 +841,28 @@ select {
 }
 
 .of-fill .metric-grid {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 4px;
 }
 
+@media (min-width: 1600px) {
+  .of-fill .metric-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
 .of-fill .scroll-box,
-.of-fill .fill-scroll,
+.of-fill .fill-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin: 0;
+  overflow: auto;
+}
+
 .of-fill .chart-stage {
-  flex: none;
+  flex: 0 0 auto;
   height: auto;
   min-height: 0;
-  max-height: none;
   margin: 0;
   overflow: visible;
 }
@@ -775,8 +888,9 @@ select {
 .of-fill .cvd-chart {
   display: block;
   width: 100%;
-  height: 180px;
-  min-height: 180px;
+  height: 120px;
+  min-height: 96px;
+  max-height: 140px;
 }
 
 .of-fill .delta-hist {
@@ -807,7 +921,8 @@ select {
 
 .of-fill .candle-chart {
   flex: none;
-  height: 240px;
+  height: 160px;
+  max-height: 36vh;
   width: 100%;
 }
 
@@ -842,10 +957,19 @@ select {
 
 .markets {
   min-height: 0;
+  height: 100%;
   display: flex;
   flex-direction: column;
   background: var(--bg-panel);
-  border-bottom: 1px solid var(--border);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.scanner-panel .markets-table-wrap {
+  overflow: auto;
+  flex: 1;
+  min-height: 0;
 }
 
 .markets-bar {
@@ -901,7 +1025,8 @@ button.star {
 
 .candle-chart {
   width: 100%;
-  height: 240px;
+  height: 180px;
+  max-height: 40vh;
   background: var(--bg);
   border-radius: 4px;
 }
@@ -912,16 +1037,58 @@ button.star {
   margin-top: 8px;
 }
 
+@media (max-width: 1400px) {
+  .desk-strip {
+    grid-template-columns: 1fr;
+  }
+
+  .app {
+    grid-template-rows: 52px minmax(160px, 22vh) minmax(0, 1fr);
+  }
+}
+
 @media (max-width: 1200px) {
   .layout {
     grid-template-columns: 1fr 1fr;
-    grid-template-rows: max-content;
+    grid-template-rows: minmax(280px, 1fr) minmax(280px, 1fr) minmax(88px, 100px);
+    grid-template-areas:
+      "dom exec"
+      "ofstack sigstack"
+      "tape positions";
+    overflow: auto;
+  }
+
+  .cell-orders {
+    display: none;
   }
 }
 
 @media (max-width: 800px) {
   .layout {
     grid-template-columns: 1fr;
+    grid-template-rows: none;
+    grid-auto-rows: minmax(220px, auto);
+    grid-template-areas:
+      "dom"
+      "exec"
+      "ofstack"
+      "sigstack"
+      "tape"
+      "positions"
+      "orders";
+    overflow: auto;
+  }
+
+  .cell-orders {
+    display: flex;
+  }
+
+  .topbar {
+    flex-wrap: wrap;
+    height: auto;
+    min-height: 52px;
+    padding: 8px 14px;
+    gap: 8px;
   }
 
   .ticket,
