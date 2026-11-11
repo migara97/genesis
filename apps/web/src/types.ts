@@ -168,6 +168,98 @@ export interface StructureZonesState {
   updatedAt: number;
 }
 
+export type ChartZoneKind = "demand" | "supply" | "balance";
+export type ChartZoneSource =
+  | "hvn_cluster"
+  | "swing_cluster"
+  | "order_block"
+  | "session_extreme";
+
+export interface ChartZoneBand {
+  id: string;
+  low: number;
+  high: number;
+  kind: ChartZoneKind;
+  source: ChartZoneSource;
+  strength: number;
+  createdAt: number;
+}
+
+export interface ChartOverlayState {
+  symbol: string;
+  poc?: number;
+  vah?: number;
+  val?: number;
+  bands: ChartZoneBand[];
+  lastBos?: { direction: string; price: number; timestamp: number };
+  lastChoch?: { direction: string; price: number; timestamp: number };
+  profileFrom?: number;
+  profileTo?: number;
+  evidence: { kind: string; note: string }[];
+  updatedAt: number;
+}
+
+export type BreakRetestPhase =
+  | "idle"
+  | "balance"
+  | "broken"
+  | "retesting"
+  | "accepted"
+  | "failed"
+  | "invalidated";
+
+export interface BreakRetestState {
+  symbol: string;
+  phase: BreakRetestPhase;
+  side?: "bullish" | "bearish";
+  bandId?: string;
+  bandLow?: number;
+  bandHigh?: number;
+  oppositeBandId?: string;
+  oppositeLow?: number;
+  oppositeHigh?: number;
+  brokenAt?: number;
+  brokenBarIndex?: number;
+  retestAt?: number;
+  acceptedAt?: number;
+  breakPrice?: number;
+  reason: string;
+  evidence: { kind: string; note: string }[];
+  updatedAt: number;
+}
+
+export type ScenarioKind =
+  | "break_now_long"
+  | "dip_to_demand_long"
+  | "break_now_short"
+  | "rally_to_supply_short";
+
+export type ScenarioStatus = "open" | "armed" | "triggered" | "invalidated" | "completed";
+
+export interface TradeScenario {
+  id: string;
+  kind: ScenarioKind;
+  status: ScenarioStatus;
+  side: "bullish" | "bearish";
+  triggerPrice: number;
+  entryLow: number;
+  entryHigh: number;
+  invalidation: number;
+  rankScore: number;
+  rankNote: string;
+  reason: string;
+  linkedBreakRetestPhase?: BreakRetestPhase;
+  updatedAt: number;
+}
+
+export interface ScenarioTreeState {
+  symbol: string;
+  bias: "bullish" | "bearish" | "none";
+  scenarios: TradeScenario[];
+  evidence: { kind: string; note: string }[];
+  updatedAt: number;
+}
+
 export interface SignalFactor {
   id: string;
   family: "structure" | "delta" | "orderflow" | "volume";
@@ -197,6 +289,21 @@ export type SignalLifecycle =
   | "EXPIRED"
   | "TIMEOUT";
 
+export type StructureTargetKind =
+  | "measured_move"
+  | "prior_swing"
+  | "session_extreme"
+  | "vp_node";
+
+export interface StructureTarget {
+  id: string;
+  kind: StructureTargetKind;
+  price: number;
+  label: string;
+  distancePct: number;
+  hitAt?: number;
+}
+
 export interface TradingSignal {
   id?: string;
   setupId?: string;
@@ -206,6 +313,7 @@ export interface TradingSignal {
   stopLoss?: number;
   takeProfit?: number[];
   riskReward?: number;
+  structureTargets?: StructureTarget[];
   confidence: number;
   confirmations: string[];
   reasonsFor: string[];
@@ -297,10 +405,37 @@ export interface BacktestResultView {
   limitation: string;
 }
 
+export type ScannerRegime =
+  | "post_pump_compression"
+  | "salvage_after_flush"
+  | "wedge_reclaim"
+  | "none";
+
+export interface ScannerHit {
+  symbol: string;
+  rankScore: number;
+  rankNote: string;
+  rvol: number;
+  compression: number;
+  nearBand?: { kind: string; low: number; high: number; source: string };
+  regime: ScannerRegime;
+  bias: "bullish" | "bearish" | "none";
+  reason: string;
+  updatedAt: number;
+}
+
+export interface ScannerSnapshot {
+  hits: ScannerHit[];
+  universeSize: number;
+  updatedAt: number;
+  evidence: { kind: string; note: string }[];
+}
+
 export interface MarketSnapshot {
   symbol: string;
   lastPrice: number;
   timestamp: number;
+  primaryInterval?: string;
   book?: { bids: BookLevel[]; asks: BookLevel[] };
   dom?: DomMetrics;
   cvd?: CvdState;
@@ -309,6 +444,9 @@ export interface MarketSnapshot {
   structure?: MarketStructureState;
   mtf?: MultiTimeframeContext;
   zones?: StructureZonesState;
+  chartOverlay?: ChartOverlayState;
+  breakRetest?: BreakRetestState;
+  scenarios?: ScenarioTreeState;
   signal?: TradingSignal;
   recentTrades: TradeTick[];
   health: ConnectionHealth;

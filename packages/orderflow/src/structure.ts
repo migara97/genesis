@@ -6,11 +6,48 @@ import type {
   TimeframeStructureSummary,
 } from "@of/shared";
 
-/** Higher timeframes used for Phase-4 confirmation (excludes primary 15m and 5m). */
+/** Higher timeframes used for HTF confirmation (excludes primary and soft LTF). */
 export const HIGHER_TIMEFRAMES = ["1d", "4h", "1h"] as const;
-/** Full MTF set: HTF + primary + soft LTF confirm. */
-export const MTF_INTERVALS = ["1d", "4h", "1h", "15m", "5m"] as const;
-export const PRIMARY_INTERVAL = "15m";
+/** Full MTF set: HTF + mid + primary + soft LTF. */
+export const MTF_INTERVALS = ["1d", "4h", "1h", "15m", "5m", "1m"] as const;
+/** Desk default primary (alt 5m workflow). Selectable at runtime via hub. */
+export const PRIMARY_INTERVAL = "5m";
+
+export const ALLOWED_PRIMARY_INTERVALS = ["5m", "15m"] as const;
+export type DeskPrimaryInterval = (typeof ALLOWED_PRIMARY_INTERVALS)[number];
+
+/** Soft LTF one step below primary. */
+export const SOFT_INTERVAL_FOR_PRIMARY: Record<DeskPrimaryInterval, string> = {
+  "5m": "1m",
+  "15m": "5m",
+};
+
+/** Mid-TF soft confirm when primary is 5m (15m bridge). */
+export const MID_INTERVAL_FOR_PRIMARY: Partial<Record<DeskPrimaryInterval, string>> = {
+  "5m": "15m",
+};
+
+export function resolvePrimaryInterval(value?: string | null): DeskPrimaryInterval {
+  const v = (value ?? PRIMARY_INTERVAL).toLowerCase();
+  if ((ALLOWED_PRIMARY_INTERVALS as readonly string[]).includes(v)) {
+    return v as DeskPrimaryInterval;
+  }
+  return PRIMARY_INTERVAL;
+}
+
+export function softIntervalForPrimary(primary: string = PRIMARY_INTERVAL): string {
+  const p = resolvePrimaryInterval(primary);
+  return SOFT_INTERVAL_FOR_PRIMARY[p];
+}
+
+export function midIntervalForPrimary(primary: string = PRIMARY_INTERVAL): string | undefined {
+  const p = resolvePrimaryInterval(primary);
+  return MID_INTERVAL_FOR_PRIMARY[p];
+}
+
+export function mtfIntervalsFor(_primary: string = PRIMARY_INTERVAL): readonly string[] {
+  return MTF_INTERVALS;
+}
 
 export function analyzeMarketStructure(
   symbol: string,

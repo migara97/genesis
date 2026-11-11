@@ -1,4 +1,4 @@
-import type { MarketRegimeTag, PaperOutcome } from "@of/shared";
+import type { MarketRegimeTag, PaperOutcome, PaperSetupClass } from "@of/shared";
 
 export interface ClosedTradeSample {
   setupId: string;
@@ -18,6 +18,8 @@ export interface ClosedTradeSample {
   mfe: number | null;
   mae: number | null;
   regimeTags: MarketRegimeTag[];
+  setupClass?: PaperSetupClass;
+  primaryTimeframe?: string;
 }
 
 export interface PerformanceReport {
@@ -201,12 +203,30 @@ export function computeCalibration(
 export function groupByRegime(
   samples: ClosedTradeSample[],
 ): Record<string, PerformanceReport> {
-  const tags = new Set<string>();
-  for (const s of samples) for (const t of s.regimeTags) tags.add(t);
+  return groupByKey(samples, (s) => s.regimeTags);
+}
+
+/**
+ * Group samples by a string key or by each tag in an array of keys.
+ */
+export function groupByKey(
+  samples: ClosedTradeSample[],
+  keyFn: (s: ClosedTradeSample) => string | string[] | undefined | null,
+): Record<string, PerformanceReport> {
+  const buckets = new Map<string, ClosedTradeSample[]>();
+  for (const s of samples) {
+    const raw = keyFn(s);
+    const keys = raw == null ? [] : Array.isArray(raw) ? raw : [raw];
+    for (const key of keys) {
+      if (!key) continue;
+      const list = buckets.get(key) ?? [];
+      list.push(s);
+      buckets.set(key, list);
+    }
+  }
   const out: Record<string, PerformanceReport> = {};
-  for (const tag of [...tags].sort()) {
-    const subset = samples.filter((s) => s.regimeTags.includes(tag as MarketRegimeTag));
-    out[tag] = computePerformance(subset, 0);
+  for (const key of [...buckets.keys()].sort()) {
+    out[key] = computePerformance(buckets.get(key)!, 0);
   }
   return out;
 }

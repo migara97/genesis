@@ -12,15 +12,22 @@ import {
   buildVolumeProfile,
   computeDomMetrics,
   createCvdState,
+  advanceBreakRetest,
+  advanceScenarioTree,
   applySignalLifecycle,
+  buildChartOverlay,
   detectStructureZones,
   generateSignal,
   MTF_INTERVALS,
   PRIMARY_INTERVAL,
+  resolvePrimaryInterval,
   summarizeTimeframeStructure,
+  type DeskPrimaryInterval,
 } from "@of/orderflow";
 import type {
+  BreakRetestState,
   Candle,
+  ChartOverlayState,
   ConnectionHealth,
   CvdState,
   DomMetrics,
@@ -29,12 +36,14 @@ import type {
   MarketStructureState,
   MultiTimeframeContext,
   OrderBookSnapshot,
+  ScenarioTreeState,
   StructureZonesState,
   TradeTick,
   TradingSignal,
   VolumeProfile,
 } from "@of/shared";
 import { config } from "./config.js";
+import { getTickerStats } from "./markets/store.js";
 import { recordSignalLifecycle } from "./signals/journal.js";
 import { syncPaperTradeFromLifecycle } from "./validation/paperLedger.js";
 import { archiveTradeTick } from "./validation/tapeArchive.js";
@@ -45,7 +54,8 @@ const MTF_CANDLE_LIMITS: Record<string, number> = {
   "4h": 120,
   "1h": 150,
   "15m": 200,
-  "5m": 150,
+  "5m": 200,
+  "1m": 150,
 };
 /** Re-fetch MTF klines on this interval (not on every trade). */
 const MTF_REFRESH_MS = 5 * 60_000;
@@ -71,8 +81,12 @@ interface SymbolState {
   candlesByInterval: Map<string, Candle[]>;
   mtf?: MultiTimeframeContext;
   zones?: StructureZonesState;
+  chartOverlay?: ChartOverlayState;
+  breakRetest?: BreakRetestState;
+  scenarios?: ScenarioTreeState;
   signal?: TradingSignal;
   lastPrice: number;
+  primaryInterval: DeskPrimaryInterval;
   health: ConnectionHealth;
   mtfRefreshTimer?: NodeJS.Timeout;
 }
@@ -88,8 +102,22 @@ export class MarketHub extends EventEmitter {
   private generation = 0;
   private retryTimer: NodeJS.Timeout | null = null;
   private tickSizes = new Map<string, number>();
+  /** Desk primary TF for the focused stream (default 5m). */
+  private primaryInterval: DeskPrimaryInterval = resolvePrimaryInterval(PRIMARY_INTERVAL);
   /** Coalesce high-frequency trade/book updates so each symbol publishes at most ~5 Hz. */
   private snapshotTimers = new Map<string, NodeJS.Timeout>();
+
+  getPrimaryInterval(): DeskPrimaryInterval {
+    return this.primaryInterval;
+  }
+
+  setPrimaryInterval(interval?: string | null): DeskPrimaryInterval {
+    this.primaryInterval = resolvePrimaryInterval(interval);
+    for (const state of this.states.values()) {
+      state.primaryInterval = this.primaryInterval;
+    }
+    return this.primaryInterval;
+  }
 
   /** Prepare empty symbol slots so the API can serve before exchange is up. */
   bootstrapSymbols(symbols = config.symbols): void {
@@ -105,6 +133,7 @@ export class MarketHub extends EventEmitter {
         candles: [],
         candlesByInterval: new Map(),
         lastPrice: 0,
+        primaryInterval: this.primaryInterval,
         health: {
           exchange: this.adapter.id,
           connected: false,
@@ -127,9 +156,10 @@ export class MarketHub extends EventEmitter {
   /**
    * Stream order-flow for one symbol. Other catalog rows stay on the ticker feed.
    */
-  async focus(symbol: string): Promise<void> {
+  async focus(symbol: string, primaryInterval?: string | null): Promise<void> {
     const normalized = symbol.trim().toUpperCase();
     if (!normalized) return;
+    if (primaryInterval != null) this.setPrimaryInterval(primaryInterval);
     const gen = ++this.generation;
     if (this.retryTimer) {
       clearTimeout(this.retryTimer);
@@ -228,6 +258,7 @@ export class MarketHub extends EventEmitter {
       symbol: symbol.toUpperCase(),
       lastPrice: s.lastPrice,
       timestamp: Date.now(),
+      primaryInterval: s.primaryInterval ?? this.primaryInterval,
       book: s.book,
       dom: s.dom,
       cvd: summarizeCvd(s.cvd),
@@ -236,6 +267,9 @@ export class MarketHub extends EventEmitter {
       structure: s.structure,
       mtf: s.mtf,
       zones: s.zones,
+      chartOverlay: s.chartOverlay,
+      breakRetest: s.breakRetest,
+      scenarios: s.scenarios,
       signal: s.signal,
       recentTrades: s.trades.slice(-80),
       health: s.health,
@@ -323,6 +357,7 @@ export class MarketHub extends EventEmitter {
     state.volumeProfile =
       buildVolumeProfile(symbol, state.sessionTrades, this.tickSize(symbol)) ??
       undefined;
+    this.recomputeChartOverlay(symbol);
   }
 
   private refreshStructure(symbol: string): void {
@@ -337,17 +372,64 @@ export class MarketHub extends EventEmitter {
     );
     state.zones = detectStructureZones(symbol, state.candles);
     this.recomputeMtfFromCache(symbol);
+    this.recomputeChartOverlay(symbol);
+  }
+
+  private recomputeChartOverlay(symbol: string): void {
+    const state = this.states.get(symbol);
+    if (!state) return;
+    state.chartOverlay = buildChartOverlay({
+      symbol,
+      lastPrice: state.lastPrice,
+      tickSize: this.tickSize(symbol),
+      trades: state.sessionTrades,
+      candles: state.candles,
+      sessionProfile: state.volumeProfile,
+      structure: state.structure,
+      zones: state.zones,
+    });
+    this.recomputeBreakRetest(symbol);
+  }
+
+  private recomputeBreakRetest(symbol: string): void {
+    const state = this.states.get(symbol);
+    if (!state) return;
+    state.breakRetest = advanceBreakRetest(state.breakRetest, {
+      symbol,
+      lastPrice: state.lastPrice,
+      candles: state.candles,
+      chartOverlay: state.chartOverlay,
+      footprint: state.footprint,
+      cvd: state.cvd,
+    });
+    this.recomputeScenarios(symbol);
+  }
+
+  private recomputeScenarios(symbol: string): void {
+    const state = this.states.get(symbol);
+    if (!state) return;
+    state.scenarios = advanceScenarioTree(state.scenarios, {
+      symbol,
+      lastPrice: state.lastPrice,
+      candles: state.candles,
+      chartOverlay: state.chartOverlay,
+      breakRetest: state.breakRetest,
+      structure: state.structure,
+      cvd: state.cvd,
+    });
   }
 
   private async loadMultiTimeframe(symbol: string): Promise<void> {
     const state = this.states.get(symbol);
     if (!state) return;
+    const primary = state.primaryInterval ?? this.primaryInterval;
+    state.primaryInterval = primary;
     const frames = [];
     for (const interval of MTF_INTERVALS) {
       const limit = MTF_CANDLE_LIMITS[interval] ?? 150;
       const candles = await this.adapter.fetchKlines(symbol, interval, limit);
       state.candlesByInterval.set(interval, candles);
-      if (interval === PRIMARY_INTERVAL) {
+      if (interval === primary) {
         state.candles = candles;
         state.lastPrice = candles[candles.length - 1]?.close ?? state.lastPrice;
       }
@@ -364,22 +446,24 @@ export class MarketHub extends EventEmitter {
       prev?.low,
     );
     // Refresh primary frame with session levels attached to structure trend.
-    const primaryIdx = frames.findIndex((f) => f.interval === PRIMARY_INTERVAL);
+    const primaryIdx = frames.findIndex((f) => f.interval === primary);
     if (primaryIdx >= 0 && state.structure) {
-      frames[primaryIdx] = summarizeTimeframeStructure(PRIMARY_INTERVAL, state.structure);
+      frames[primaryIdx] = summarizeTimeframeStructure(primary, state.structure);
     }
-    state.mtf = buildMultiTimeframeContext(frames, PRIMARY_INTERVAL, Date.now());
+    state.mtf = buildMultiTimeframeContext(frames, primary, Date.now());
     state.zones = detectStructureZones(symbol, state.candles);
+    this.recomputeChartOverlay(symbol);
   }
 
   private recomputeMtfFromCache(symbol: string): void {
     const state = this.states.get(symbol);
     if (!state || state.candlesByInterval.size === 0) return;
+    const primary = state.primaryInterval ?? this.primaryInterval;
     const frames = [];
     for (const interval of MTF_INTERVALS) {
       const candles = state.candlesByInterval.get(interval);
       if (!candles?.length) continue;
-      if (interval === PRIMARY_INTERVAL) {
+      if (interval === primary) {
         frames.push(
           summarizeTimeframeStructure(
             interval,
@@ -393,7 +477,7 @@ export class MarketHub extends EventEmitter {
       }
     }
     if (frames.length === 0) return;
-    state.mtf = buildMultiTimeframeContext(frames, PRIMARY_INTERVAL, Date.now());
+    state.mtf = buildMultiTimeframeContext(frames, primary, Date.now());
   }
 
   private scheduleMtfRefresh(symbol: string): void {
@@ -414,6 +498,8 @@ export class MarketHub extends EventEmitter {
     const state = this.states.get(symbol);
     if (!state || !state.lastPrice) return;
     const now = Date.now();
+    // Advance playbook on each signal pass so OF updates can accept/fail retests.
+    this.recomputeBreakRetest(symbol);
     const previous = state.signal;
     const candidate = generateSignal({
       symbol,
@@ -426,10 +512,13 @@ export class MarketHub extends EventEmitter {
       structure: state.structure,
       mtf: state.mtf,
       zones: state.zones,
+      chartOverlay: state.chartOverlay,
+      breakRetest: state.breakRetest,
     });
     state.signal = applySignalLifecycle(previous, candidate, state.lastPrice, now);
     try {
       recordSignalLifecycle(previous, state.signal, state.lastPrice, config.exchange);
+      const ticker = getTickerStats(config.exchange, symbol);
       syncPaperTradeFromLifecycle({
         previous,
         next: state.signal,
@@ -437,6 +526,9 @@ export class MarketHub extends EventEmitter {
         exchange: config.exchange,
         candles: state.candles,
         structureTrend: state.structure?.trend,
+        primaryTimeframe: state.primaryInterval ?? this.primaryInterval,
+        quoteVolume24h: ticker?.volume24h,
+        changePct24h: ticker?.changePct24h,
         ofSnapshot: {
           cvd: state.cvd?.cvd,
           footprintDelta: state.footprint?.totalDelta,
@@ -447,6 +539,15 @@ export class MarketHub extends EventEmitter {
           mtfSummary: state.mtf
             ? `${state.mtf.higherTfBullish}b/${state.mtf.higherTfBearish}s conf=${state.mtf.conflictWithPrimary}`
             : undefined,
+          structureTargets: state.signal?.structureTargets,
+          breakRetest: state.breakRetest
+            ? {
+                phase: state.breakRetest.phase,
+                side: state.breakRetest.side,
+                bandId: state.breakRetest.bandId,
+              }
+            : undefined,
+          quoteVolume24h: ticker?.volume24h ?? undefined,
         },
       });
     } catch (err) {

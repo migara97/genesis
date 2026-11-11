@@ -6,6 +6,7 @@ import type {
   OrderRecord,
   Position,
   RiskConfig,
+  ScannerSnapshot,
   SignalJournalMetrics,
   SignalSetupRow,
 } from "./types";
@@ -93,8 +94,12 @@ export async function setFavorite(symbol: string, favorite: boolean) {
   );
 }
 
-export async function fetchCandles(symbol: string, interval = "15m"): Promise<{ candles: Candle[] }> {
+export async function fetchCandles(symbol: string, interval = "5m"): Promise<{ candles: Candle[] }> {
   return json(await fetch(`/api/markets/${encodeURIComponent(symbol)}/candles?interval=${interval}`));
+}
+
+export async function fetchScanner(): Promise<ScannerSnapshot> {
+  return json(await fetch("/api/scanner"));
 }
 
 export async function updateRisk(patch: Partial<RiskConfig>) {

@@ -252,6 +252,25 @@ export function getInstrument(
   return { symbol: row.symbol, status: row.status, tickSize: row.tick_size };
 }
 
+export function getTickerStats(
+  exchange: string,
+  symbol: string,
+): { volume24h: number | null; changePct24h: number | null; lastPrice: number | null } | null {
+  const row = db
+    .prepare(
+      `SELECT volume_24h, change_pct_24h, last_price FROM market_tickers WHERE exchange = ? AND symbol = ?`,
+    )
+    .get(exchange, symbol.toUpperCase()) as
+    | { volume_24h: number | null; change_pct_24h: number | null; last_price: number | null }
+    | undefined;
+  if (!row) return null;
+  return {
+    volume24h: numOrNull(row.volume_24h),
+    changePct24h: numOrNull(row.change_pct_24h),
+    lastPrice: numOrNull(row.last_price),
+  };
+}
+
 export function setFavorite(exchange: string, symbol: string, favorite: boolean): void {
   const normalized = symbol.toUpperCase();
   if (favorite) {

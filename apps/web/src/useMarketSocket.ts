@@ -1,6 +1,26 @@
 import { useEffect, useRef, useState } from "react";
 import type { ConnectionHealth, MarketSnapshot } from "./types";
 
+const PRIMARY_KEY = "genesis.primaryInterval";
+
+export function readStoredPrimaryInterval(): "5m" | "15m" {
+  try {
+    const v = localStorage.getItem(PRIMARY_KEY);
+    if (v === "15m" || v === "5m") return v;
+  } catch {
+    // ignore
+  }
+  return "5m";
+}
+
+export function storePrimaryInterval(interval: "5m" | "15m"): void {
+  try {
+    localStorage.setItem(PRIMARY_KEY, interval);
+  } catch {
+    // ignore
+  }
+}
+
 function wsUrl(): string {
   const proto = window.location.protocol === "https:" ? "wss" : "ws";
   return `${proto}://${window.location.host}/ws`;
@@ -14,6 +34,7 @@ export function useMarketSocket() {
   const retryRef = useRef(0);
   const wsRef = useRef<WebSocket | null>(null);
   const symbolRef = useRef<string | null>(null);
+  const primaryRef = useRef<"5m" | "15m">(readStoredPrimaryInterval());
 
   useEffect(() => {
     let ws: WebSocket | null = null;
@@ -28,7 +49,13 @@ export function useMarketSocket() {
         setError(null);
         retryRef.current = 0;
         if (symbolRef.current) {
-          ws?.send(JSON.stringify({ type: "subscribe", symbol: symbolRef.current }));
+          ws?.send(
+            JSON.stringify({
+              type: "subscribe",
+              symbol: symbolRef.current,
+              primaryInterval: primaryRef.current,
+            }),
+          );
         }
       };
       ws.onclose = () => {
@@ -76,12 +103,44 @@ export function useMarketSocket() {
     };
   }, []);
 
-  const subscribe = (symbol: string) => {
+  const subscribe = (symbol: string, primaryInterval?: "5m" | "15m") => {
     symbolRef.current = symbol;
+    if (primaryInterval) {
+      primaryRef.current = primaryInterval;
+      storePrimaryInterval(primaryInterval);
+    }
     if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type: "subscribe", symbol }));
+      wsRef.current.send(
+        JSON.stringify({
+          type: "subscribe",
+          symbol,
+          primaryInterval: primaryRef.current,
+        }),
+      );
     }
   };
 
-  return { snapshots, health, connected, error, subscribe };
+  const setPrimaryInterval = (interval: "5m" | "15m") => {
+    primaryRef.current = interval;
+    storePrimaryInterval(interval);
+    if (symbolRef.current && wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(
+        JSON.stringify({
+          type: "subscribe",
+          symbol: symbolRef.current,
+          primaryInterval: interval,
+        }),
+      );
+    }
+  };
+
+  return {
+    snapshots,
+    health,
+    connected,
+    error,
+    subscribe,
+    setPrimaryInterval,
+    primaryInterval: primaryRef.current,
+  };
 }

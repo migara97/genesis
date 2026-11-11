@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import {
   emergencyShutdown,
   fetchBacktest,
@@ -15,6 +15,8 @@ import {
 } from "./api";
 import type {
   BacktestResultView,
+  BreakRetestState,
+  ChartOverlayState,
   CvdState,
   ExecutionMode,
   FootprintBar,
@@ -24,21 +26,26 @@ import type {
   OrderRecord,
   Position,
   RiskConfig,
+  ScenarioTreeState,
   SignalJournalMetrics,
   SignalSetupRow,
+  StructureTarget,
   StructureZonesState,
+  TradeScenario,
   TradingSignal,
   VolumeProfile,
 } from "./types";
 import { CandleChart } from "./CandleChart";
 import { DepthChart } from "./DepthChart";
 import { Markets } from "./Markets";
-import { useMarketSocket } from "./useMarketSocket";
+import { ScannerPanel } from "./ScannerPanel";
+import { readStoredPrimaryInterval, useMarketSocket } from "./useMarketSocket";
 
 export default function App() {
-  const { snapshots, health, connected, error, subscribe } = useMarketSocket();
+  const { snapshots, health, connected, error, subscribe, setPrimaryInterval } = useMarketSocket();
   const symbols = Object.keys(snapshots);
   const [symbol, setSymbol] = useState("");
+  const [primaryInterval, setPrimaryLocal] = useState<"5m" | "15m">(readStoredPrimaryInterval());
   const [pinned, setPinned] = useState(false);
   const [mode, setModeState] = useState<ExecutionMode>("PAPER");
   const [risk, setRisk] = useState<RiskConfig | null>(null);
@@ -58,7 +65,13 @@ export default function App() {
   const selectSymbol = (next: string) => {
     setPinned(true);
     setSymbol(next);
-    subscribe(next);
+    subscribe(next, primaryInterval);
+  };
+
+  const onPrimaryChange = (next: "5m" | "15m") => {
+    setPrimaryLocal(next);
+    setPrimaryInterval(next);
+    if (symbol) subscribe(symbol, next);
   };
 
   useEffect(() => {
@@ -129,8 +142,18 @@ export default function App() {
         </span>
         <span className="pill warn">Default: PAPER</span>
         <span className="pill">{symbol || "select a market"}</span>
+        <span className="pill">{snap?.primaryInterval ?? primaryInterval} primary</span>
         <span className="price">{fmt(snap?.lastPrice)}</span>
         <div className="spacer" />
+        <select
+          value={primaryInterval}
+          onChange={(e) => onPrimaryChange(e.target.value as "5m" | "15m")}
+          aria-label="Primary timeframe"
+          title="Desk primary TF (structure/zones/overlays)"
+        >
+          <option value="5m">Primary 5m</option>
+          <option value="15m">Primary 15m</option>
+        </select>
         <select value={mode} onChange={(e) => void onModeChange(e.target.value as ExecutionMode)}>
           <option value="ANALYSIS_ONLY">Analysis Only</option>
           <option value="PAPER">Paper Trading</option>
@@ -142,6 +165,7 @@ export default function App() {
       </header>
 
       <Markets selected={symbol} onSelect={selectSymbol} />
+      <ScannerPanel selected={symbol} onSelect={selectSymbol} />
 
       <main className="layout">
         <section className="panel" style={{ gridRow: "1 / 3" }}>
@@ -194,7 +218,7 @@ export default function App() {
         <section className="panel of-fill">
           <h3>Signal Engine</h3>
           <div className="panel-body">
-            <SignalBoard signal={snap?.signal} symbol={snap?.symbol} cvd={snap?.cvd} footprint={snap?.footprint} structure={snap?.structure} mtf={snap?.mtf} zones={snap?.zones} />
+            <SignalBoard signal={snap?.signal} symbol={snap?.symbol} cvd={snap?.cvd} footprint={snap?.footprint} structure={snap?.structure} mtf={snap?.mtf} zones={snap?.zones} breakRetest={snap?.breakRetest} scenarios={snap?.scenarios} />
           </div>
         </section>
 
@@ -236,12 +260,22 @@ export default function App() {
                   <strong className="sell">{fmt(snap?.signal?.stopLoss)}</strong>
                 </div>
                 <div className="metric">
-                  <span>Take profit</span>
+                  <span>Risk TP (R)</span>
                   <strong className="buy">{(snap?.signal?.takeProfit ?? []).map(fmt).join(" / ") || "-"}</strong>
                 </div>
                 <div className="metric">
                   <span>Risk / reward</span>
                   <strong>{snap?.signal?.riskReward ?? "-"}</strong>
+                </div>
+                <div className="metric" style={{ gridColumn: "1 / -1" }}>
+                  <span>Structure TP</span>
+                  <strong className="buy">
+                    {(snap?.signal?.structureTargets ?? []).length
+                      ? (snap?.signal?.structureTargets ?? [])
+                          .map((t) => `${shortTargetKind(t.kind)} ${fmt(t.price)}${t.hitAt ? " ✓" : ""}`)
+                          .join(" · ")
+                      : "-"}
+                  </strong>
                 </div>
               </div>
             </div>
@@ -289,7 +323,15 @@ export default function App() {
         <section className="panel of-fill">
           <h3>CVD</h3>
           <div className="panel-body">
-            <CvdBoard cvd={snap?.cvd} symbol={symbol} />
+            <CvdBoard
+              cvd={snap?.cvd}
+              symbol={symbol}
+              overlay={snap?.chartOverlay}
+              breakRetest={snap?.breakRetest}
+              structureTargets={snap?.signal?.structureTargets}
+              scenarios={snap?.scenarios}
+              primaryInterval={snap?.primaryInterval ?? primaryInterval}
+            />
           </div>
         </section>
 
@@ -517,6 +559,8 @@ function SignalBoard({
   structure,
   mtf,
   zones,
+  breakRetest,
+  scenarios,
 }: {
   signal?: TradingSignal;
   symbol?: string;
@@ -525,6 +569,8 @@ function SignalBoard({
   structure?: MarketStructureState;
   mtf?: MultiTimeframeContext;
   zones?: StructureZonesState;
+  breakRetest?: BreakRetestState;
+  scenarios?: ScenarioTreeState;
 }) {
   const direction = signal?.direction ?? "WAIT";
   const [metrics, setMetrics] = useState<SignalJournalMetrics | null>(null);
@@ -614,13 +660,25 @@ function SignalBoard({
           <strong className="sell">{fmt(signal?.stopLoss)}</strong>
         </div>
         <div className="metric">
-          <span>Take profit</span>
+          <span>Risk TP (R)</span>
           <strong className="buy">{(signal?.takeProfit ?? []).map(fmt).join(" / ") || "-"}</strong>
         </div>
         <div className="metric">
           <span>Risk / reward</span>
           <strong>{signal?.riskReward ?? "-"}</strong>
         </div>
+      </div>
+      <div className="desk-kicker">Structure TP (geometry)</div>
+      <div className="chip-row">
+        {(signal?.structureTargets ?? []).map((t) => (
+          <span key={t.id} className={`chip ${t.hitAt ? "ok" : ""}`} title={t.label}>
+            {shortTargetKind(t.kind)} {fmt(t.price)}
+            {t.hitAt ? " hit" : ""}
+          </span>
+        ))}
+        {(signal?.structureTargets ?? []).length === 0 && (
+          <span className="chip">No structure targets (WAIT or no geometry)</span>
+        )}
       </div>
       <div className="desk-kicker">Checks already computed</div>
       <div className="chip-row">
@@ -713,6 +771,51 @@ function SignalBoard({
           (zones?.recentSweeps?.length ?? 0) ===
           0 && <span className="chip">No active OB/FVG/sweeps</span>}
       </div>
+      <div className="desk-kicker">Break / retest playbook</div>
+      <div className="chip-row">
+        <span
+          className={`chip ${
+            breakRetest?.phase === "accepted"
+              ? "ok"
+              : breakRetest?.phase === "failed" || breakRetest?.phase === "invalidated"
+                ? "hot"
+                : ""
+          }`}
+        >
+          {breakRetest?.phase?.toUpperCase() ?? "IDLE"}
+          {breakRetest?.side ? ` · ${breakRetest.side}` : ""}
+        </span>
+        {breakRetest?.bandLow != null && breakRetest?.bandHigh != null ? (
+          <span className="chip">
+            band {fmt(breakRetest.bandLow)}–{fmt(breakRetest.bandHigh)}
+          </span>
+        ) : null}
+        <span className="muted" style={{ fontSize: 12 }}>
+          {breakRetest?.reason ?? "Waiting for demand/supply balance."}
+        </span>
+      </div>
+      <div className="desk-kicker">Scenarios</div>
+      <div className="chip-row">
+        <span className={`chip ${scenarios?.bias === "bullish" ? "ok" : scenarios?.bias === "bearish" ? "hot" : ""}`}>
+          Bias {scenarios?.bias ?? "none"}
+        </span>
+        {(scenarios?.scenarios ?? []).map((sc) => (
+          <span
+            key={sc.id}
+            className={`chip ${scenarioStatusChipClass(sc.status)}`}
+            title={`${sc.reason}\n${sc.rankNote}`}
+          >
+            {scenarioKindShort(sc.kind)} · {sc.status} · entry {fmt(sc.entryLow)}–{fmt(sc.entryHigh)} · inv{" "}
+            {fmt(sc.invalidation)} · rank {(sc.rankScore * 100).toFixed(0)}
+          </span>
+        ))}
+        {(scenarios?.scenarios ?? []).length === 0 && (
+          <span className="chip">No live scenarios</span>
+        )}
+      </div>
+      <p className="disclaimer" style={{ marginTop: 4 }}>
+        Hypotheses only — rank is not a win rate. Executable path remains the single TradingSignal + break/retest accept.
+      </p>
       <div className="desk-kicker">Confirmations</div>
       <ul className="list">
         {(signal?.confirmations ?? []).map((item) => (
@@ -802,42 +905,89 @@ function SignalBoard({
         ))}
         {journal.length === 0 && <li>No journal rows yet</li>}
       </ul>
-      <div className="desk-kicker">Forward paper validation</div>
-      {validation?.performance ? (
-        <div className="metric-grid">
-          <div className="metric">
-            <span>Resolved TP/SL</span>
-            <strong>{String((validation.performance as { closedTrades?: number }).closedTrades ?? "-")}</strong>
+      <div className="desk-kicker">Phase F — RANGE_BREAK_RETEST scoreboard</div>
+      {validation?.breakRetestPerformance || validation?.performance ? (
+        <>
+          <div className="metric-grid">
+            <div className="metric">
+              <span>BR resolved</span>
+              <strong>
+                {String(
+                  (validation.breakRetestPerformance as { closedTrades?: number } | undefined)
+                    ?.closedTrades ?? 0,
+                )}
+              </strong>
+            </div>
+            <div className="metric">
+              <span>BR win rate (CI)</span>
+              <strong>{fmtWinRate(validation.breakRetestPerformance as PerfSlice | undefined)}</strong>
+            </div>
+            <div className="metric">
+              <span>BR expectancy (net)</span>
+              <strong>
+                {fmtExpectancy(
+                  (validation.breakRetestPerformance as { expectancy?: number | null } | undefined)
+                    ?.expectancy,
+                )}
+              </strong>
+            </div>
+            <div className="metric">
+              <span>BR avg fees / u</span>
+              <strong>
+                {fmtExpectancy(
+                  (validation.breakRetestPerformance as { averageFees?: number | null } | undefined)
+                    ?.averageFees,
+                )}
+              </strong>
+            </div>
           </div>
-          <div className="metric">
-            <span>Win rate (CI)</span>
-            <strong>
-              {(() => {
-                const p = validation.performance as {
-                  winRate?: number | null;
-                  winRateCi95?: { low: number; high: number } | null;
-                };
-                if (p.winRate == null) return "n/a";
-                const ci = p.winRateCi95;
-                return ci
-                  ? `${(p.winRate * 100).toFixed(0)}% [${(ci.low * 100).toFixed(0)}–${(ci.high * 100).toFixed(0)}]`
-                  : `${(p.winRate * 100).toFixed(0)}%`;
-              })()}
-            </strong>
+          <div className="desk-kicker">Overall paper (all setups)</div>
+          <div className="metric-grid">
+            <div className="metric">
+              <span>Resolved TP/SL</span>
+              <strong>
+                {String((validation.performance as { closedTrades?: number }).closedTrades ?? "-")}
+              </strong>
+            </div>
+            <div className="metric">
+              <span>Win rate (CI)</span>
+              <strong>{fmtWinRate(validation.performance as PerfSlice)}</strong>
+            </div>
+            <div className="metric">
+              <span>Expectancy (net)</span>
+              <strong>
+                {fmtExpectancy(
+                  (validation.performance as { expectancy?: number | null }).expectancy,
+                )}
+              </strong>
+            </div>
+            <div className="metric">
+              <span>Open paper</span>
+              <strong>{String(validation.openTrades ?? "-")}</strong>
+            </div>
           </div>
-          <div className="metric">
-            <span>Net pnl / u</span>
-            <strong>
-              {String((validation.performance as { netProfit?: number }).netProfit ?? "-")}
-            </strong>
+          <div className="desk-kicker">Strata</div>
+          <div className="chip-row">
+            {strataChips(validation.byPrimaryTimeframe as Record<string, PerfSlice> | undefined, "TF")}
+            {strataChips(validation.byLiquidity as Record<string, PerfSlice> | undefined, "Liq")}
+            {strataChips(validation.byRangeContext as Record<string, PerfSlice> | undefined, "Range")}
+            {Object.keys(
+              (validation.byPrimaryTimeframe as object | undefined) ?? {},
+            ).length +
+              Object.keys((validation.byLiquidity as object | undefined) ?? {}).length +
+              Object.keys((validation.byRangeContext as object | undefined) ?? {}).length ===
+              0 && <span className="chip">No strata yet</span>}
           </div>
-          <div className="metric">
-            <span>Open paper</span>
-            <strong>{String(validation.openTrades ?? "-")}</strong>
-          </div>
-        </div>
+        </>
       ) : (
         <p className="disclaimer">Validation report loading…</p>
+      )}
+      {validation?.phaseFNote ? (
+        <p className="disclaimer">{String(validation.phaseFNote)}</p>
+      ) : (
+        <p className="disclaimer">
+          Phase F scoreboard — falsify RANGE_BREAK_RETEST; do not raise live size on thin samples.
+        </p>
       )}
       {validation?.calibration ? (
         <p className="disclaimer">
@@ -892,7 +1042,38 @@ function SignalBoard({
   );
 }
 
-function CvdBoard({ cvd, symbol }: { cvd?: CvdState; symbol: string }) {
+function shortTargetKind(kind: string): string {
+  switch (kind) {
+    case "measured_move":
+      return "MM";
+    case "prior_swing":
+      return "swing";
+    case "session_extreme":
+      return "session";
+    case "vp_node":
+      return "VP";
+    default:
+      return kind;
+  }
+}
+
+function CvdBoard({
+  cvd,
+  symbol,
+  overlay,
+  breakRetest,
+  structureTargets,
+  scenarios,
+  primaryInterval,
+}: {
+  cvd?: CvdState;
+  symbol: string;
+  overlay?: ChartOverlayState;
+  breakRetest?: BreakRetestState;
+  structureTargets?: StructureTarget[];
+  scenarios?: ScenarioTreeState;
+  primaryInterval?: string;
+}) {
   const points = cvd?.points ?? [];
   const first = points[0];
   const last = points[points.length - 1];
@@ -959,7 +1140,14 @@ function CvdBoard({ cvd, symbol }: { cvd?: CvdState; symbol: string }) {
         </div>
       </div>
       <p className="disclaimer">{relation} * exhaustion is a heuristic.</p>
-      <CandleChart symbol={symbol} />
+      <CandleChart
+        symbol={symbol}
+        interval={primaryInterval ?? "5m"}
+        overlay={overlay}
+        breakRetest={breakRetest}
+        structureTargets={structureTargets}
+        scenarios={scenarios}
+      />
       </div>
     </div>
   );
@@ -1180,6 +1368,60 @@ function lifecycleChipClass(value?: string): string {
   if (value === "CONFIRMED" || value === "ACTIVE" || value === "HIT_TP") return "ok";
   if (value === "HIT_SL" || value === "INVALIDATED" || value === "EXPIRED" || value === "TIMEOUT") return "hot";
   if (value === "PENDING_CONFIRM") return "up";
+  return "";
+}
+
+type PerfSlice = {
+  closedTrades?: number;
+  winRate?: number | null;
+  winRateCi95?: { low: number; high: number } | null;
+  expectancy?: number | null;
+};
+
+function fmtWinRate(p?: PerfSlice): string {
+  if (!p || p.winRate == null) return "n/a";
+  const ci = p.winRateCi95;
+  return ci
+    ? `${(p.winRate * 100).toFixed(0)}% [${(ci.low * 100).toFixed(0)}–${(ci.high * 100).toFixed(0)}]`
+    : `${(p.winRate * 100).toFixed(0)}%`;
+}
+
+function fmtExpectancy(value?: number | null): string {
+  if (value == null || !Number.isFinite(value)) return "n/a";
+  return fmtQty(value);
+}
+
+function strataChips(
+  map: Record<string, PerfSlice> | undefined,
+  prefix: string,
+): ReactNode[] {
+  if (!map) return [];
+  return Object.entries(map).map(([key, slice]) => (
+    <span key={`${prefix}-${key}`} className="chip" title={`n=${slice.closedTrades ?? 0}`}>
+      {prefix} {key}: {fmtWinRate(slice)} · E {fmtExpectancy(slice.expectancy)}
+    </span>
+  ));
+}
+
+function scenarioKindShort(kind: TradeScenario["kind"]): string {
+  switch (kind) {
+    case "break_now_long":
+      return "Break-now long";
+    case "dip_to_demand_long":
+      return "Dip-to-demand";
+    case "break_now_short":
+      return "Break-now short";
+    case "rally_to_supply_short":
+      return "Rally-to-supply";
+    default:
+      return kind;
+  }
+}
+
+function scenarioStatusChipClass(status: TradeScenario["status"]): string {
+  if (status === "triggered" || status === "armed") return "ok";
+  if (status === "invalidated") return "hot";
+  if (status === "completed") return "up";
   return "";
 }
 

@@ -38,6 +38,14 @@ if (!schemaPath) {
 }
 db.exec(fs.readFileSync(schemaPath, "utf8"));
 
+/** Additive migrations for existing local DBs (CREATE IF NOT EXISTS won't alter columns). */
+function ensureColumn(table: string, column: string, ddl: string): void {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+  if (cols.some((c) => c.name === column)) return;
+  db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
+}
+ensureColumn("paper_trades", "setup_class", "setup_class TEXT NOT NULL DEFAULT 'OTHER'");
+
 export function saveOrder(order: unknown): void {
   const id = (order as { id: string }).id;
   db.prepare(

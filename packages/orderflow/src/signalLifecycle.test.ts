@@ -96,6 +96,31 @@ describe("applySignalLifecycle", () => {
     assert.equal(hit.lifecycle, "HIT_TP");
   });
 
+  it("tags structure target hits without forcing HIT_TP", () => {
+    const signal = generateSignal({ ...longInput(95), timestamp: 1_000 }, std);
+    const confirmed = applySignalLifecycle(undefined, signal, 95, 1_000);
+    const tp1 = confirmed.takeProfit![0]!;
+    // Place structure target between entry and TP1 so a touch is not a risk-TP exit.
+    const mid = (confirmed.entry! + tp1) / 2;
+    const withTargets: TradingSignal = {
+      ...confirmed,
+      structureTargets: [
+        {
+          id: "t1",
+          kind: "prior_swing",
+          price: mid,
+          label: `swing ${mid}`,
+          distancePct: (mid - confirmed.entry!) / confirmed.entry!,
+        },
+      ],
+    };
+    const active = applySignalLifecycle(withTargets, withTargets, mid + 0.001, 1_500);
+    assert.equal(active.lifecycle, "ACTIVE");
+    assert.ok(active.structureTargets?.[0]?.hitAt === 1_500);
+    assert.match(active.lifecycleNote ?? "", /Structure swing touched/);
+    assert.ok(mid + 0.001 < tp1, "fixture must stay below TP1");
+  });
+
   it("invalidates when confirmations drop to WAIT", () => {
     const signal = generateSignal({ ...longInput(95), timestamp: 1_000 }, std);
     const confirmed = applySignalLifecycle(undefined, signal, 95, 1_000);

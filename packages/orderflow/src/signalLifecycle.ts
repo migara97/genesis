@@ -1,4 +1,5 @@
 import type { SignalLifecycle, TradingSignal } from "@of/shared";
+import { tagStructureTargetHits } from "./structureTargets.js";
 
 export interface LifecycleConfig {
   /** Max age for PENDING_CONFIRM without becoming LONG/SHORT. */
@@ -84,6 +85,7 @@ export function applySignalLifecycle(
         stopLoss: previous.stopLoss,
         takeProfit: previous.takeProfit,
         riskReward: previous.riskReward,
+        structureTargets: previous.structureTargets,
         setupId: previous.setupId,
         id: previous.setupId,
       },
@@ -126,6 +128,7 @@ function continueSetup(
         stopLoss: previous.stopLoss,
         takeProfit: previous.takeProfit,
         riskReward: previous.riskReward,
+        structureTargets: previous.structureTargets,
         setupId: previous.setupId,
         id: previous.setupId,
       },
@@ -153,11 +156,22 @@ function continueSetup(
   const tps = candidate.takeProfit ?? previous.takeProfit ?? [];
   const firstTp = tps[0];
   const side = candidate.direction;
+  const preservedTargets = previous.structureTargets ?? candidate.structureTargets;
+  const { targets: taggedTargets, newlyHit } = tagStructureTargetHits(
+    preservedTargets,
+    side,
+    price,
+    now,
+  );
+  const structureHitNote =
+    newlyHit.length > 0
+      ? newlyHit.map((t) => `Structure ${shortKind(t.kind)} touched @ ${t.price}`).join("; ")
+      : undefined;
 
   if (stop != null) {
     if (side === "LONG" && price <= stop) {
       return withLifecycle(
-        mergeDirectional(previous, candidate, openedAt),
+        mergeDirectional(previous, candidate, openedAt, taggedTargets),
         "HIT_SL",
         now,
         openedAt,
@@ -166,7 +180,7 @@ function continueSetup(
     }
     if (side === "SHORT" && price >= stop) {
       return withLifecycle(
-        mergeDirectional(previous, candidate, openedAt),
+        mergeDirectional(previous, candidate, openedAt, taggedTargets),
         "HIT_SL",
         now,
         openedAt,
@@ -177,7 +191,7 @@ function continueSetup(
   if (firstTp != null) {
     if (side === "LONG" && price >= firstTp) {
       return withLifecycle(
-        mergeDirectional(previous, candidate, openedAt),
+        mergeDirectional(previous, candidate, openedAt, taggedTargets),
         "HIT_TP",
         now,
         openedAt,
@@ -186,7 +200,7 @@ function continueSetup(
     }
     if (side === "SHORT" && price <= firstTp) {
       return withLifecycle(
-        mergeDirectional(previous, candidate, openedAt),
+        mergeDirectional(previous, candidate, openedAt, taggedTargets),
         "HIT_TP",
         now,
         openedAt,
@@ -201,7 +215,7 @@ function continueSetup(
     hasOpposingChoch(candidate, side)
   ) {
     return withLifecycle(
-      mergeDirectional(previous, candidate, openedAt),
+      mergeDirectional(previous, candidate, openedAt, taggedTargets),
       "INVALIDATED",
       now,
       openedAt,
@@ -211,7 +225,7 @@ function continueSetup(
 
   if (age > config.activeMaxAgeMs) {
     return withLifecycle(
-      mergeDirectional(previous, candidate, openedAt),
+      mergeDirectional(previous, candidate, openedAt, taggedTargets),
       "TIMEOUT",
       now,
       openedAt,
@@ -221,12 +235,17 @@ function continueSetup(
 
   // Duplicate suppression: first tick CONFIRMED, later ticks ACTIVE (same setupId).
   if (previous.lifecycle === "CONFIRMED" || previous.lifecycle === "ACTIVE") {
+    const note =
+      structureHitNote ??
+      (previous.lifecycle === "CONFIRMED"
+        ? "Setup remains valid; monitoring TP/SL."
+        : previous.lifecycleNote);
     return withLifecycle(
-      mergeDirectional(previous, candidate, openedAt),
+      mergeDirectional(previous, candidate, openedAt, taggedTargets),
       "ACTIVE",
       previous.lifecycle === "ACTIVE" ? previous.lifecycleUpdatedAt : now,
       openedAt,
-      previous.lifecycle === "CONFIRMED" ? "Setup remains valid; monitoring TP/SL." : previous.lifecycleNote,
+      note,
     );
   }
 
@@ -238,6 +257,7 @@ function mergeDirectional(
   previous: TradingSignal,
   candidate: TradingSignal,
   openedAt: number,
+  structureTargets?: TradingSignal["structureTargets"],
 ): TradingSignal {
   return {
     ...candidate,
@@ -249,7 +269,24 @@ function mergeDirectional(
     stopLoss: previous.stopLoss ?? candidate.stopLoss,
     takeProfit: previous.takeProfit ?? candidate.takeProfit,
     riskReward: previous.riskReward ?? candidate.riskReward,
+    structureTargets:
+      structureTargets ?? previous.structureTargets ?? candidate.structureTargets,
   };
+}
+
+function shortKind(kind: string): string {
+  switch (kind) {
+    case "measured_move":
+      return "MM";
+    case "prior_swing":
+      return "swing";
+    case "session_extreme":
+      return "session";
+    case "vp_node":
+      return "VP";
+    default:
+      return kind;
+  }
 }
 
 function pickLiveFields(candidate: TradingSignal): Partial<TradingSignal> {

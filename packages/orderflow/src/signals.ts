@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 import type {
+  BreakRetestState,
+  ChartOverlayState,
   CvdState,
   DomMetrics,
   EvidenceTag,
@@ -14,6 +16,7 @@ import type {
   VolumeProfile,
 } from "@of/shared";
 import { priceInZone } from "./priceZones.js";
+import { buildStructureTargets } from "./structureTargets.js";
 
 export interface SignalInput {
   symbol: string;
@@ -28,6 +31,10 @@ export interface SignalInput {
   mtf?: MultiTimeframeContext | null;
   /** Phase 6 OB / FVG / sweep zones. */
   zones?: StructureZonesState | null;
+  /** Phase A chart overlay (optional context). */
+  chartOverlay?: ChartOverlayState | null;
+  /** Phase B breakout + retest playbook. */
+  breakRetest?: BreakRetestState | null;
 }
 
 /** Configurable signal weights. Phase-6 adds OB/FVG/sweep heuristics. */
@@ -48,6 +55,8 @@ export interface SignalEngineConfig {
     domImbalance: number;
     volumeProfileExtreme: number;
     lvnContinuation: number;
+    /** Phase B: accepted break + retest location weight. */
+    breakRetestAccept: number;
   };
   /** Relative distance to treat price as "near" POC/HVN/LVN. */
   levelProximityPct: number;
@@ -89,6 +98,7 @@ export const DEFAULT_SIGNAL_CONFIG: SignalEngineConfig = {
     domImbalance: 0.5,
     volumeProfileExtreme: 0.5,
     lvnContinuation: 0.5,
+    breakRetestAccept: 0.85,
   },
   levelProximityPct: 0.0015,
   domRequiresTradeDelta: true,
@@ -110,7 +120,7 @@ export const STANDARD_SIGNAL_CONFIG: SignalEngineConfig = {
 };
 
 const MODEL_NOTE =
-  "Scores use configurable rule weights (A+ entry profile when enabled: HTF permission + OF trigger + location; BOS/CHoCH/VP/zones; DOM needs trade-delta). Confidence is a model score, not a calibrated win probability. A+ ≠ 100% accuracy.";
+  "Scores use configurable rule weights (A+ entry profile when enabled: HTF permission + OF trigger + location; BOS/CHoCH/VP/zones/break-retest; DOM needs trade-delta). Confidence is a model score, not a calibrated win probability. A+ ≠ 100% accuracy.";
 
 /**
  * Rule-based multi-confirmation signal engine.
@@ -129,7 +139,8 @@ export function generateSignal(
   let shortScore = 0;
   let neutralScore = 0;
 
-  const { footprint, cvd, dom, volumeProfile, structure, mtf, zones, lastPrice } = input;
+  const { footprint, cvd, dom, volumeProfile, structure, mtf, zones, breakRetest, lastPrice } =
+    input;
   const w = config.weights;
 
   const addLong = (factor: Omit<SignalFactor, "side">) => {
@@ -244,9 +255,13 @@ export function generateSignal(
   if (mtf && mtf.frames.length > 0) {
     evidence.push({
       kind: "inferred",
-      note: "Multi-timeframe trends are derived from per-interval candle swings (1d/4h/1h/15m/5m), not exchange-labeled bias.",
+      note: "Multi-timeframe trends are derived from per-interval candle swings (1d/4h/1h/15m/5m/1m), not exchange-labeled bias.",
     });
-    const soft = mtf.frames.find((f) => f.interval === "5m");
+    const softInterval =
+      mtf.primaryInterval === "5m" ? "1m" : mtf.primaryInterval === "15m" ? "5m" : "5m";
+    const midInterval = mtf.primaryInterval === "5m" ? "15m" : undefined;
+    const soft = mtf.frames.find((f) => f.interval === softInterval);
+    const mid = midInterval ? mtf.frames.find((f) => f.interval === midInterval) : undefined;
     const primaryTrend =
       mtf.frames.find((f) => f.interval === mtf.primaryInterval)?.trend ?? structure?.trend;
 
@@ -282,7 +297,7 @@ export function generateSignal(
         family: "structure",
         weight: w.mtfSoftAlign,
         source: "derived",
-        reason: "5m structure soft-confirms bullish bias.",
+        reason: `${softInterval} structure soft-confirms bullish bias.`,
       });
     } else if (
       soft?.trend === "bearish" &&
@@ -293,7 +308,28 @@ export function generateSignal(
         family: "structure",
         weight: w.mtfSoftAlign,
         source: "derived",
-        reason: "5m structure soft-confirms bearish bias.",
+        reason: `${softInterval} structure soft-confirms bearish bias.`,
+      });
+    }
+
+    if (mid?.trend === "bullish" && (primaryTrend === "bullish" || mtf.higherTfBullish > mtf.higherTfBearish)) {
+      addLong({
+        id: "mtf_mid_bullish",
+        family: "structure",
+        weight: w.mtfSoftAlign,
+        source: "derived",
+        reason: `${midInterval} mid-TF soft-confirms bullish bias.`,
+      });
+    } else if (
+      mid?.trend === "bearish" &&
+      (primaryTrend === "bearish" || mtf.higherTfBearish > mtf.higherTfBullish)
+    ) {
+      addShort({
+        id: "mtf_mid_bearish",
+        family: "structure",
+        weight: w.mtfSoftAlign,
+        source: "derived",
+        reason: `${midInterval} mid-TF soft-confirms bearish bias.`,
       });
     }
 
@@ -672,6 +708,47 @@ export function generateSignal(
     });
   }
 
+  // Phase B: accepted break + retest is a location confirmation (not a solo entry).
+  if (breakRetest) {
+    evidence.push({
+      kind: "inferred",
+      note: "Break/retest factors are mechanical band+OF heuristics — not path forecasts.",
+    });
+    if (breakRetest.phase === "accepted" && breakRetest.side === "bullish") {
+      addLong({
+        id: "break_retest_bullish",
+        family: "structure",
+        weight: w.breakRetestAccept,
+        source: "heuristic",
+        reason:
+          breakRetest.reason ||
+          "Bullish range break + retest accepted with order-flow continuation.",
+      });
+      structureOk = true;
+    } else if (breakRetest.phase === "accepted" && breakRetest.side === "bearish") {
+      addShort({
+        id: "break_retest_bearish",
+        family: "structure",
+        weight: w.breakRetestAccept,
+        source: "heuristic",
+        reason:
+          breakRetest.reason ||
+          "Bearish range break + retest accepted with order-flow continuation.",
+      });
+      structureOk = true;
+    } else if (
+      (breakRetest.phase === "failed" || breakRetest.phase === "invalidated") &&
+      breakRetest.side
+    ) {
+      addNeutral({
+        id: "break_retest_failed",
+        family: "structure",
+        source: "heuristic",
+        reason: `Break/retest playbook ${breakRetest.phase}: ${breakRetest.reason}`,
+      });
+    }
+  }
+
   const independent = new Set<SignalFactorFamily>(
     confirmations.map((c) => {
       if (
@@ -680,6 +757,7 @@ export function generateSignal(
         c.startsWith("ob_") ||
         c.startsWith("fvg_") ||
         c.startsWith("sweep_") ||
+        c.startsWith("break_retest") ||
         c.includes("bos") ||
         c.includes("choch")
       )
@@ -776,6 +854,7 @@ export function generateSignal(
   let stopLoss: number | undefined;
   let takeProfit: number[] | undefined;
   let riskReward: number | undefined;
+  let structureTargets: TradingSignal["structureTargets"];
   const invalidation: string[] = [];
 
   if (direction === "LONG") {
@@ -786,7 +865,17 @@ export function generateSignal(
     const risk = entry - stopLoss;
     takeProfit = [entry + risk * 1.5, entry + risk * 2.5, entry + risk * 3.5];
     riskReward = 1.5;
+    structureTargets = buildStructureTargets({
+      side: "LONG",
+      entry,
+      breakRetest,
+      structure,
+      volumeProfile,
+    });
     invalidation.push("Close below stop or bearish CHoCH with negative CVD confirmation.");
+    if (breakRetest?.phase === "invalidated" || breakRetest?.phase === "failed") {
+      invalidation.push(`Break/retest playbook ${breakRetest.phase}: ${breakRetest.reason}`);
+    }
   } else if (direction === "SHORT") {
     entry = lastPrice;
     stopLoss = volumeProfile?.vah
@@ -795,13 +884,26 @@ export function generateSignal(
     const risk = stopLoss - entry;
     takeProfit = [entry - risk * 1.5, entry - risk * 2.5, entry - risk * 3.5];
     riskReward = 1.5;
+    structureTargets = buildStructureTargets({
+      side: "SHORT",
+      entry,
+      breakRetest,
+      structure,
+      volumeProfile,
+    });
     invalidation.push("Close above stop or bullish CHoCH with positive CVD confirmation.");
+    if (breakRetest?.phase === "invalidated" || breakRetest?.phase === "failed") {
+      invalidation.push(`Break/retest playbook ${breakRetest.phase}: ${breakRetest.reason}`);
+    }
   } else {
     invalidation.push(
       config.entryQuality === "a_plus"
         ? "WAIT until A+ checklist passes (HTF permission + OF trigger + location + no conflict)."
         : "WAIT until ≥2 independent confirmations align.",
     );
+    if (breakRetest?.phase === "broken" || breakRetest?.phase === "retesting") {
+      invalidation.push(`Break/retest still ${breakRetest.phase} — wait for accepted reclaim + OF.`);
+    }
   }
 
   const score: SignalScoreBreakdown = {
@@ -824,6 +926,10 @@ export function generateSignal(
       ? `${mtf.higherTfBullish}b${mtf.higherTfBearish}s${mtf.conflictWithPrimary ? "x" : ""}`
       : undefined,
     grade: entryGrade,
+    breakBand:
+      breakRetest?.phase === "accepted" && breakRetest.bandId
+        ? `${breakRetest.side}:${breakRetest.bandId}`
+        : undefined,
   });
 
   const lifecycle =
@@ -843,6 +949,7 @@ export function generateSignal(
     stopLoss,
     takeProfit,
     riskReward,
+    structureTargets,
     confidence,
     confirmations,
     reasonsFor,
@@ -913,12 +1020,26 @@ export function evaluateAPlusEntry(args: {
   }
 
   const locationIds = bull
-    ? ["ob_bullish_zone", "fvg_bullish_zone", "sweep_ssl_reclaim", "price_at_val_discount", "lvn_bullish_continuation"]
-    : ["ob_bearish_zone", "fvg_bearish_zone", "sweep_bsl_reclaim", "price_at_vah_premium", "lvn_bearish_continuation"];
+    ? [
+        "ob_bullish_zone",
+        "fvg_bullish_zone",
+        "sweep_ssl_reclaim",
+        "price_at_val_discount",
+        "lvn_bullish_continuation",
+        "break_retest_bullish",
+      ]
+    : [
+        "ob_bearish_zone",
+        "fvg_bearish_zone",
+        "sweep_bsl_reclaim",
+        "price_at_vah_premium",
+        "lvn_bearish_continuation",
+        "break_retest_bearish",
+      ];
   const hasLocation = locationIds.some((id) => args.confirmations.includes(id));
   if (!hasLocation) {
     pass = false;
-    notes.push("Location missing (need OB/FVG/sweep reclaim or VP extreme/LVN).");
+    notes.push("Location missing (need OB/FVG/sweep reclaim, VP extreme/LVN, or accepted break/retest).");
   } else {
     notes.push("Location OK.");
   }
@@ -946,6 +1067,7 @@ function buildSetupId(parts: {
   choch?: number;
   mtf?: string;
   grade?: string;
+  breakBand?: string;
 }): string {
   const raw = [
     parts.symbol.toUpperCase(),
@@ -956,6 +1078,7 @@ function buildSetupId(parts: {
     parts.choch != null ? String(parts.choch) : "",
     parts.mtf ?? "",
     parts.grade ?? "",
+    parts.breakBand ?? "",
   ].join("|");
   return createHash("sha1").update(raw).digest("hex").slice(0, 16);
 }

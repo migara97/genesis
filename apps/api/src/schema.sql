@@ -135,6 +135,7 @@ CREATE TABLE IF NOT EXISTS paper_trades (
   opened_at INTEGER NOT NULL,
   closed_at INTEGER,
   primary_timeframe TEXT NOT NULL,
+  setup_class TEXT NOT NULL DEFAULT 'OTHER',
   entry REAL NOT NULL,
   entry_fill REAL,
   stop_loss REAL NOT NULL,

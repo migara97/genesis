@@ -3,6 +3,7 @@ import {
   analyzeMarketStructure,
   buildMultiTimeframeContext,
   PRIMARY_INTERVAL,
+  softIntervalForPrimary,
   summarizeTimeframeStructure,
 } from "./structure.js";
 import { applySignalLifecycle } from "./signalLifecycle.js";
@@ -304,7 +305,9 @@ function buildMtfAt(
     const window = softTimeframe.filter((c) => c.closeTime <= asOf);
     if (window.length >= 20) {
       const structure = analyzeMarketStructure(symbol, window, 3);
-      frames.push(summarizeTimeframeStructure("5m", structure));
+      frames.push(
+        summarizeTimeframeStructure(softIntervalForPrimary(primaryInterval), structure),
+      );
     }
   }
   return buildMultiTimeframeContext(frames, primaryInterval, asOf);

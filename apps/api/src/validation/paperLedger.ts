@@ -1,6 +1,7 @@
 import type {
   MarketRegimeTag,
   PaperOutcome,
+  PaperSetupClass,
   PaperTradeSnapshot,
   TradingSignal,
 } from "@of/shared";
@@ -8,8 +9,10 @@ import {
   DEFAULT_COST_MODEL,
   SIGNAL_ENGINE_VERSION,
   computeCostedPnl,
+  deriveSetupClass,
   fingerprintConfig,
-  tagMarketRegimes,
+  rangeContextFromTags,
+  tagPaperRegimes,
   type CostModelConfig,
 } from "@of/orderflow";
 import { db } from "../db.js";
@@ -31,11 +34,14 @@ export interface PaperTradeRow {
   generatedAt: number;
   openedAt: number;
   closedAt: number | null;
+  primaryTimeframe: string;
+  setupClass: PaperSetupClass;
   entry: number;
   stopLoss: number;
   takeProfit: number[];
   exitPrice: number | null;
   confidence: number;
+  confirmations: string[];
   grossPnl: number | null;
   fees: number | null;
   funding: number | null;
@@ -58,8 +64,19 @@ export function syncPaperTradeFromLifecycle(args: {
   next: TradingSignal;
   price: number;
   exchange?: string;
-  candles?: { open: number; high: number; low: number; close: number; volume: number; openTime: number; closeTime: number }[];
+  candles?: {
+    open: number;
+    high: number;
+    low: number;
+    close: number;
+    volume: number;
+    openTime: number;
+    closeTime: number;
+  }[];
   structureTrend?: string;
+  primaryTimeframe?: string;
+  quoteVolume24h?: number | null;
+  changePct24h?: number | null;
   ofSnapshot?: PaperTradeSnapshot["ofSnapshot"];
   costs?: CostModelConfig;
 }): void {
@@ -87,12 +104,21 @@ export function syncPaperTradeFromLifecycle(args: {
   const opening =
     (next.lifecycle === "CONFIRMED" || next.lifecycle === "ACTIVE") && !existing;
   if (opening) {
-    const regimes = tagMarketRegimes({
+    const setupClass = deriveSetupClass(next.confirmations);
+    const regimes = tagPaperRegimes({
       structure: args.structureTrend
         ? { trend: args.structureTrend as "bullish" | "bearish" | "range" }
         : null,
       candles: args.candles as never,
+      quoteVolume24h: args.quoteVolume24h ?? args.ofSnapshot?.quoteVolume24h,
+      changePct24h: args.changePct24h,
     });
+    const ofSnapshot: PaperTradeSnapshot["ofSnapshot"] = {
+      ...args.ofSnapshot,
+      structureTargets: args.ofSnapshot?.structureTargets ?? next.structureTargets,
+      quoteVolume24h: args.quoteVolume24h ?? args.ofSnapshot?.quoteVolume24h,
+      rangeContext: rangeContextFromTags(regimes),
+    };
     const snapshot: PaperTradeSnapshot = {
       signalId: next.id,
       setupId: next.setupId,
@@ -102,7 +128,8 @@ export function syncPaperTradeFromLifecycle(args: {
       pair: next.symbol,
       direction: side,
       generatedAt: next.timestamp,
-      primaryTimeframe: "15m",
+      primaryTimeframe: args.primaryTimeframe ?? "5m",
+      setupClass,
       entry: next.entry,
       stopLoss: next.stopLoss,
       takeProfit: next.takeProfit ?? [],
@@ -125,19 +152,19 @@ export function syncPaperTradeFromLifecycle(args: {
       regimeTags: regimes,
       engineVersion: SIGNAL_ENGINE_VERSION,
       configVersion: CONFIG_VERSION,
-      ofSnapshot: args.ofSnapshot,
+      ofSnapshot,
     };
 
     db.prepare(
       `
       INSERT OR IGNORE INTO paper_trades (
         id, setup_id, symbol, exchange, market_type, pair, direction, lifecycle, outcome,
-        generated_at, opened_at, closed_at, primary_timeframe, entry, entry_fill, stop_loss,
+        generated_at, opened_at, closed_at, primary_timeframe, setup_class, entry, entry_fill, stop_loss,
         take_profit, exit_price, exit_fill, confidence, long_score, short_score, families,
         confirmations, regime_tags, engine_version, config_version, gross_pnl, fees, funding,
         net_pnl, r_multiple, mfe, mae, hold_ms, ambiguous_same_bar, of_snapshot, signal_payload,
         updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, NULL, ?, ?, NULL, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, NULL, ?, ?, ?, NULL, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0, ?, ?, ?)
       `,
     ).run(
       `paper-${next.setupId}`,
@@ -150,7 +177,8 @@ export function syncPaperTradeFromLifecycle(args: {
       next.lifecycle,
       next.timestamp,
       next.setupOpenedAt ?? next.timestamp,
-      "15m",
+      args.primaryTimeframe ?? "5m",
+      setupClass,
       next.entry,
       next.stopLoss,
       JSON.stringify(next.takeProfit ?? []),
@@ -162,7 +190,7 @@ export function syncPaperTradeFromLifecycle(args: {
       JSON.stringify(regimes),
       SIGNAL_ENGINE_VERSION,
       CONFIG_VERSION,
-      JSON.stringify(args.ofSnapshot ?? {}),
+      JSON.stringify(ofSnapshot ?? {}),
       JSON.stringify({ signal: next, snapshot }),
       now,
     );
@@ -225,15 +253,32 @@ export function syncPaperTradeFromLifecycle(args: {
   );
 }
 
-export function listPaperTrades(opts: { symbol?: string; limit?: number }): PaperTradeRow[] {
+export function listPaperTrades(opts: {
+  symbol?: string;
+  limit?: number;
+  setupClass?: PaperSetupClass;
+}): PaperTradeRow[] {
   const limit = Math.min(Math.max(opts.limit ?? 50, 1), 500);
-  const rows = opts.symbol
-    ? (db
-        .prepare(`SELECT * FROM paper_trades WHERE symbol = ? ORDER BY opened_at DESC LIMIT ?`)
-        .all(opts.symbol.toUpperCase(), limit) as Record<string, unknown>[])
-    : (db
-        .prepare(`SELECT * FROM paper_trades ORDER BY opened_at DESC LIMIT ?`)
-        .all(limit) as Record<string, unknown>[]);
+  let rows: Record<string, unknown>[];
+  if (opts.symbol && opts.setupClass) {
+    rows = db
+      .prepare(
+        `SELECT * FROM paper_trades WHERE symbol = ? AND setup_class = ? ORDER BY opened_at DESC LIMIT ?`,
+      )
+      .all(opts.symbol.toUpperCase(), opts.setupClass, limit) as Record<string, unknown>[];
+  } else if (opts.symbol) {
+    rows = db
+      .prepare(`SELECT * FROM paper_trades WHERE symbol = ? ORDER BY opened_at DESC LIMIT ?`)
+      .all(opts.symbol.toUpperCase(), limit) as Record<string, unknown>[];
+  } else if (opts.setupClass) {
+    rows = db
+      .prepare(`SELECT * FROM paper_trades WHERE setup_class = ? ORDER BY opened_at DESC LIMIT ?`)
+      .all(opts.setupClass, limit) as Record<string, unknown>[];
+  } else {
+    rows = db
+      .prepare(`SELECT * FROM paper_trades ORDER BY opened_at DESC LIMIT ?`)
+      .all(limit) as Record<string, unknown>[];
+  }
   return rows.map(mapRow);
 }
 
@@ -259,6 +304,10 @@ function updateExtrema(
 }
 
 function mapRow(row: Record<string, unknown>): PaperTradeRow {
+  const confirmations = JSON.parse(String(row.confirmations || "[]")) as string[];
+  const setupClass =
+    (row.setup_class as PaperSetupClass | undefined) ??
+    deriveSetupClass(confirmations);
   return {
     id: String(row.id),
     setupId: String(row.setup_id),
@@ -272,11 +321,14 @@ function mapRow(row: Record<string, unknown>): PaperTradeRow {
     generatedAt: Number(row.generated_at),
     openedAt: Number(row.opened_at),
     closedAt: row.closed_at == null ? null : Number(row.closed_at),
+    primaryTimeframe: String(row.primary_timeframe ?? "5m"),
+    setupClass,
     entry: Number(row.entry),
     stopLoss: Number(row.stop_loss),
     takeProfit: JSON.parse(String(row.take_profit || "[]")) as number[],
     exitPrice: row.exit_price == null ? null : Number(row.exit_price),
     confidence: Number(row.confidence),
+    confirmations,
     grossPnl: row.gross_pnl == null ? null : Number(row.gross_pnl),
     fees: row.fees == null ? null : Number(row.fees),
     funding: row.funding == null ? null : Number(row.funding),

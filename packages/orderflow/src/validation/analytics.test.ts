@@ -1,9 +1,37 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { computeCalibration, computePerformance, wilsonInterval } from "./analytics.js";
+import {
+  computeCalibration,
+  computePerformance,
+  groupByKey,
+  wilsonInterval,
+} from "./analytics.js";
 import { computeCostedPnl } from "./costModel.js";
 import { resolvePathExit } from "./pathExit.js";
 import type { ClosedTradeSample } from "./analytics.js";
+
+function sample(partial: Partial<ClosedTradeSample> & { setupId: string }): ClosedTradeSample {
+  return {
+    symbol: "BTCUSDT",
+    side: "LONG",
+    outcome: "HIT_TP",
+    isResolvedWinLoss: true,
+    won: true,
+    netPnl: 1,
+    grossPnl: 1.1,
+    fees: 0.1,
+    funding: 0,
+    rMultiple: 1,
+    confidence: 0.6,
+    holdMs: 1000,
+    mfe: 1,
+    mae: -0.2,
+    regimeTags: [],
+    setupClass: "OTHER",
+    primaryTimeframe: "5m",
+    ...partial,
+  };
+}
 
 describe("validation analytics", () => {
   it("wilson interval is undefined for n=0 and narrows with n", () => {
@@ -64,6 +92,33 @@ describe("validation analytics", () => {
     const cal = computeCalibration([]);
     assert.equal(cal.sufficient, false);
     assert.ok(/Insufficient/i.test(cal.sampleNote));
+  });
+
+  it("groupByKey stratifies break/retest and TF", () => {
+    const samples = [
+      sample({
+        setupId: "br",
+        setupClass: "RANGE_BREAK_RETEST",
+        primaryTimeframe: "5m",
+        netPnl: 2,
+        fees: 0.2,
+      }),
+      sample({
+        setupId: "ot",
+        setupClass: "OTHER",
+        primaryTimeframe: "15m",
+        netPnl: -1,
+        won: false,
+        outcome: "HIT_SL",
+      }),
+    ];
+    const byClass = groupByKey(samples, (s) => s.setupClass);
+    assert.equal(byClass.RANGE_BREAK_RETEST?.closedTrades, 1);
+    assert.equal(byClass.RANGE_BREAK_RETEST?.expectancy, 2);
+    assert.equal(byClass.OTHER?.closedTrades, 1);
+    const byTf = groupByKey(samples, (s) => s.primaryTimeframe);
+    assert.equal(byTf["5m"]?.closedTrades, 1);
+    assert.equal(byTf["15m"]?.closedTrades, 1);
   });
 });
 

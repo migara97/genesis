@@ -16,6 +16,7 @@ import {
   replaceCandleCache,
   setFavorite,
 } from "./markets/store.js";
+import { getScannerSnapshot, startAltScanner } from "./scanner/runner.js";
 import { computeJournalMetrics, listSignalSetups } from "./signals/journal.js";
 import { listPaperTrades } from "./validation/paperLedger.js";
 import { buildValidationReport } from "./validation/report.js";
@@ -45,6 +46,8 @@ app.get("/api/snapshots/:symbol", async (req, reply) => {
   if (!snap) return reply.code(404).send({ error: "Symbol not streaming" });
   return snap;
 });
+
+app.get("/api/scanner", async () => getScannerSnapshot());
 
 app.get("/api/risk", async () => executionService.getRisk());
 app.put("/api/risk", async (req) => {
@@ -151,7 +154,7 @@ app.post("/api/watchlist", async (req, reply) => {
 
 app.get("/api/markets/:symbol/candles", async (req, reply) => {
   const symbol = (req.params as { symbol: string }).symbol.toUpperCase();
-  const interval = ((req.query as { interval?: string }).interval ?? "15m").toLowerCase();
+  const interval = ((req.query as { interval?: string }).interval ?? "5m").toLowerCase();
   const allowed = new Set(["1m", "3m", "5m", "15m", "1h", "4h", "1d"]);
   if (!allowed.has(interval)) return reply.code(400).send({ error: "Unsupported interval" });
   const adapter =
@@ -180,17 +183,26 @@ app.get("/api/signals/metrics", async (req) => {
 });
 
 app.get("/api/validation/report", async (req) => {
-  const q = req.query as { symbol?: string };
-  return buildValidationReport(q.symbol?.toUpperCase());
+  const q = req.query as { symbol?: string; setupClass?: string };
+  const setupClass =
+    q.setupClass === "RANGE_BREAK_RETEST" || q.setupClass === "OTHER"
+      ? q.setupClass
+      : undefined;
+  return buildValidationReport(q.symbol?.toUpperCase(), { setupClass });
 });
 
 app.get("/api/validation/paper-trades", async (req) => {
-  const q = req.query as { symbol?: string; limit?: string };
+  const q = req.query as { symbol?: string; limit?: string; setupClass?: string };
   const limit = q.limit ? Number(q.limit) : 50;
+  const setupClass =
+    q.setupClass === "RANGE_BREAK_RETEST" || q.setupClass === "OTHER"
+      ? q.setupClass
+      : undefined;
   return {
     trades: listPaperTrades({
       symbol: q.symbol?.toUpperCase(),
       limit: Number.isFinite(limit) ? limit : 50,
+      setupClass,
     }),
   };
 });
@@ -222,12 +234,12 @@ app.get("/api/backtest/:symbol", async (req) => {
     config.exchange === "binance"
       ? new BinanceFuturesMarketDataAdapter()
       : new OkxSwapMarketDataAdapter();
-  const [primary, d1, h4, h1, m5] = await Promise.all([
-    adapter.fetchKlines(symbol, "15m", 300),
+  const [primary, d1, h4, h1, soft] = await Promise.all([
+    adapter.fetchKlines(symbol, "5m", 300),
     adapter.fetchKlines(symbol, "1d", 120),
     adapter.fetchKlines(symbol, "4h", 180),
     adapter.fetchKlines(symbol, "1h", 300),
-    adapter.fetchKlines(symbol, "5m", 300),
+    adapter.fetchKlines(symbol, "1m", 300),
   ]);
   const feeBps = q.feeBps != null && Number.isFinite(Number(q.feeBps)) ? Number(q.feeBps) : 4;
   const slippageBps =
@@ -240,8 +252,8 @@ app.get("/api/backtest/:symbol", async (req) => {
       { interval: "4h", candles: h4 },
       { interval: "1h", candles: h1 },
     ],
-    m5,
-    { feeBps, slippageBps },
+    soft,
+    { feeBps, slippageBps, primaryInterval: "5m" },
   );
   return {
     symbol,
@@ -279,7 +291,11 @@ app.register(async (instance) => {
 
     socket.on("message", (raw) => {
       try {
-        const msg = JSON.parse(raw.toString()) as { type?: string; symbol?: string };
+        const msg = JSON.parse(raw.toString()) as {
+          type?: string;
+          symbol?: string;
+          primaryInterval?: string;
+        };
         if (msg.type === "ping") send("pong", {});
         if (msg.type === "subscribe" && msg.symbol) {
           const symbol = msg.symbol.toUpperCase();
@@ -293,7 +309,7 @@ app.register(async (instance) => {
             return;
           }
           if (instrument) marketHub.setTickSize(symbol, instrument.tickSize);
-          void marketHub.focus(symbol);
+          void marketHub.focus(symbol, msg.primaryInterval);
         }
       } catch {
         // ignore malformed client messages
@@ -322,6 +338,7 @@ try {
   );
   void marketHub.focus(initialSymbol);
   startMarketSync(app.log);
+  startAltScanner(app.log);
 } catch (err) {
   app.log.error(err);
   process.exit(1);
