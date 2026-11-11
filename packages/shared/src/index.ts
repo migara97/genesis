@@ -651,7 +651,7 @@ export const DEFAULT_RISK_CONFIG: RiskConfig = {
   maxDailyLossPercent: 2,
   maxOpenPositions: 3,
   maxDrawdownPercent: 6,
-  minRiskReward: 1.5,
+  minRiskReward: 2,
   accountEquity: 100_000,
   tradingEnabled: true,
   emergencyShutdown: false,

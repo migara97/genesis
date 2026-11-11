@@ -863,8 +863,8 @@ export function generateSignal(
       ? Math.min(volumeProfile.val, lastPrice) * 0.998
       : lastPrice * 0.995;
     const risk = entry - stopLoss;
-    takeProfit = [entry + risk * 1.5, entry + risk * 2.5, entry + risk * 3.5];
-    riskReward = 1.5;
+    takeProfit = [entry + risk * 2, entry + risk * 3, entry + risk * 4];
+    riskReward = 2;
     structureTargets = buildStructureTargets({
       side: "LONG",
       entry,
@@ -882,8 +882,8 @@ export function generateSignal(
       ? Math.max(volumeProfile.vah, lastPrice) * 1.002
       : lastPrice * 1.005;
     const risk = stopLoss - entry;
-    takeProfit = [entry - risk * 1.5, entry - risk * 2.5, entry - risk * 3.5];
-    riskReward = 1.5;
+    takeProfit = [entry - risk * 2, entry - risk * 3, entry - risk * 4];
+    riskReward = 2;
     structureTargets = buildStructureTargets({
       side: "SHORT",
       entry,

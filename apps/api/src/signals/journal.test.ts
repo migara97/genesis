@@ -12,8 +12,8 @@ function baseSignal(overrides: Partial<TradingSignal> = {}): TradingSignal {
     direction: "LONG",
     entry: 100,
     stopLoss: 99,
-    takeProfit: [101.5],
-    riskReward: 1.5,
+    takeProfit: [102],
+    riskReward: 2,
     confidence: 0.5,
     confirmations: ["structure_bullish"],
     reasonsFor: ["test"],
@@ -42,17 +42,27 @@ function baseSignal(overrides: Partial<TradingSignal> = {}): TradingSignal {
 
 describe("signal journal", () => {
   it("records lifecycle transitions and computes TP/SL win rate only", () => {
-    const setupId = `setup-p5-${Date.now()}`;
-    const opened = baseSignal({ id: setupId, setupId, lifecycle: "CONFIRMED" });
+    const now = Date.now();
+    const setupId = `setup-p5-${now}`;
+    const opened = baseSignal({
+      id: setupId,
+      setupId,
+      lifecycle: "CONFIRMED",
+      timestamp: now,
+      lifecycleUpdatedAt: now,
+      setupOpenedAt: now,
+    });
     recordSignalLifecycle(undefined, opened, 100, "binance");
     const hit = baseSignal({
       id: setupId,
       setupId,
       lifecycle: "HIT_TP",
-      lifecycleUpdatedAt: 1_700_000_000_500,
+      timestamp: now + 1,
+      lifecycleUpdatedAt: now + 1,
+      setupOpenedAt: now,
       lifecycleNote: "tp",
     });
-    recordSignalLifecycle(opened, hit, 101.5, "binance");
+    recordSignalLifecycle(opened, hit, 102, "binance");
 
     const rows = listSignalSetups({ symbol: "BTCUSDT", limit: 50 });
     assert.ok(rows.some((r) => r.setupId === setupId && r.lifecycle === "HIT_TP"));
