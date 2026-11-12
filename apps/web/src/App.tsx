@@ -8,8 +8,13 @@ import {
   fetchRisk,
   fetchSignalJournal,
   fetchSignalMetrics,
+  fetchHealth,
+  fetchParityReport,
+  fetchSecrets,
   fetchValidationReport,
   placeOrder,
+  putSecret,
+  rotateSecrets,
   setMode,
   updateRisk,
 } from "./api";
@@ -54,6 +59,7 @@ export default function App() {
   const [qty, setQty] = useState("0.001");
   const [stop, setStop] = useState("");
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
+  const [showSettings, setShowSettings] = useState(false);
 
   const snap: MarketSnapshot | undefined =
     snapshots[symbol] ?? (!pinned ? snapshots[symbols[0] ?? ""] : undefined);
@@ -164,10 +170,16 @@ export default function App() {
           <option value="PAPER">Paper Trading</option>
           <option value="LIVE">Live Trading</option>
         </select>
+        <button type="button" className="chip" onClick={() => setShowSettings((v) => !v)}>
+          Settings
+        </button>
         <button className="danger" onClick={() => void emergencyShutdown().then(refreshPortfolio)}>
           Kill Switch
         </button>
       </header>
+      {showSettings ? (
+        <SettingsPanel onClose={() => setShowSettings(false)} />
+      ) : null}
 
       <div className="desk-strip">
         <Markets selected={symbol} onSelect={selectSymbol} />
@@ -187,7 +199,25 @@ export default function App() {
               <span>{snap?.dom?.pullStackHint ?? "-"}</span>
               <span className="muted">Spoof risk</span>
               <span>{snap?.dom?.spoofingRisk ?? "-"} (heuristic)</span>
+              <span className="muted">Iceberg</span>
+              <span>
+                {snap?.dom?.iceberg && snap.dom.iceberg.side !== "none"
+                  ? `${snap.dom.iceberg.side} ×${snap.dom.iceberg.refillCount} conf ${snap.dom.iceberg.confidence}`
+                  : "none"}{" "}
+                (heuristic)
+              </span>
+              <span className="muted">Lead/lag</span>
+              <span>
+                {snap?.microstructure?.leaderLagger
+                  ? `${snap.microstructure.leaderLagger.role} conf ${snap.microstructure.leaderLagger.confidence}`
+                  : "-"}
+              </span>
             </div>
+            {snap?.microstructure?.commentary?.text ? (
+              <p className="disclaimer" style={{ marginBottom: 8 }}>
+                Commentary (template, no score mutation): {snap.microstructure.commentary.text}
+              </p>
+            ) : null}
             <div className="dom">
               <div>
                 <div className="muted">Asks</div>
@@ -284,8 +314,26 @@ export default function App() {
                   <strong>{risk?.riskPercentPerTrade ?? "-"}%</strong>
                 </div>
                 <div className="metric">
+                  <span>Sizing profile</span>
+                  <strong>{risk?.sizingProfile ?? "standard"}</strong>
+                </div>
+                <div className="metric">
+                  <span>Min grade</span>
+                  <strong>{risk?.minEntryGrade ?? "STANDARD"}</strong>
+                </div>
+                <div className="metric">
                   <span>Max daily loss</span>
                   <strong>{risk?.maxDailyLossPercent ?? "-"}%</strong>
+                </div>
+                <div className="metric">
+                  <span>Scale remaining</span>
+                  <strong>
+                    {snap?.signal?.scaleRemainingFrac != null
+                      ? `${(snap.signal.scaleRemainingFrac * 100).toFixed(0)}%`
+                      : snap?.signal?.tpHits
+                        ? "0%"
+                        : "100%"}
+                  </strong>
                 </div>
                 <div className="metric">
                   <span>Emergency</span>
@@ -294,17 +342,35 @@ export default function App() {
                   </strong>
                 </div>
               </div>
-              <button
-                onClick={() =>
-                  void updateRisk({
-                    riskPercentPerTrade: Number(
-                      prompt("Risk % per trade", String(risk?.riskPercentPerTrade ?? 0.5)),
-                    ),
-                  }).then(refreshPortfolio)
-                }
-              >
-                Edit Risk %
-              </button>
+              <div className="trade-actions">
+                <select
+                  aria-label="Sizing profile"
+                  value={risk?.sizingProfile ?? "standard"}
+                  onChange={(e) =>
+                    void updateRisk({
+                      sizingProfile: e.target.value as
+                        | "conservative"
+                        | "standard"
+                        | "aggressive",
+                    }).then(refreshPortfolio)
+                  }
+                >
+                  <option value="conservative">Conservative (0.25% · A+)</option>
+                  <option value="standard">Standard (0.5%)</option>
+                  <option value="aggressive">Aggressive (1%)</option>
+                </select>
+                <button
+                  onClick={() =>
+                    void updateRisk({
+                      riskPercentPerTrade: Number(
+                        prompt("Risk % per trade", String(risk?.riskPercentPerTrade ?? 0.5)),
+                      ),
+                    }).then(refreshPortfolio)
+                  }
+                >
+                  Edit Risk %
+                </button>
+              </div>
             </div>
             <p className="disclaimer">
               Paper is default. Live requires explicit confirmation and server-side API keys.
@@ -606,26 +672,32 @@ function SignalBoard({
   const [btBusy, setBtBusy] = useState(false);
   const [btError, setBtError] = useState<string | null>(null);
   const [validation, setValidation] = useState<Record<string, unknown> | null>(null);
+  const [parity, setParity] = useState<Record<string, unknown> | null>(null);
+  const [parityBusy, setParityBusy] = useState(false);
+  const [parityError, setParityError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!symbol) return;
     let cancelled = false;
     const load = async () => {
       try {
-        const [m, j, v] = await Promise.all([
+        const [m, j, v, p] = await Promise.all([
           fetchSignalMetrics(symbol),
           fetchSignalJournal(symbol, 12),
           fetchValidationReport(symbol),
+          fetchParityReport(symbol),
         ]);
         if (cancelled) return;
         setMetrics(m);
         setJournal(j.setups);
         setValidation(v);
+        setParity(p);
       } catch {
         if (!cancelled) {
           setMetrics(null);
           setJournal([]);
           setValidation(null);
+          setParity(null);
         }
       }
     };
@@ -636,6 +708,19 @@ function SignalBoard({
       clearInterval(timer);
     };
   }, [symbol, signal?.lifecycle, signal?.setupId]);
+
+  const runParity = async () => {
+    if (!symbol) return;
+    setParityBusy(true);
+    setParityError(null);
+    try {
+      setParity(await fetchParityReport(symbol, { run: true, maxTicks: 50_000 }));
+    } catch (err) {
+      setParityError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setParityBusy(false);
+    }
+  };
 
   const runBacktest = async () => {
     if (!symbol) return;
@@ -674,7 +759,15 @@ function SignalBoard({
           Lifecycle {signal?.lifecycle ?? "WATCHING"}
         </span>
         {signal?.lifecycleNote ? <span className="chip">{signal.lifecycleNote}</span> : null}
+        {signal?.commentary?.text ? (
+          <span className="chip" title={signal.commentary.text}>
+            Commentary on
+          </span>
+        ) : null}
       </div>
+      {signal?.commentary?.text ? (
+        <p className="disclaimer">{signal.commentary.text}</p>
+      ) : null}
       </div>
       <div className="fill-scroll">
       <div className="metric-grid">
@@ -932,7 +1025,38 @@ function SignalBoard({
         ))}
         {journal.length === 0 && <li>No journal rows yet</li>}
       </ul>
-      <div className="desk-kicker">Phase F — RANGE_BREAK_RETEST scoreboard</div>
+      <div className="desk-kicker">Phase 8 — Accuracy freeze</div>
+      {validation?.gates ? (
+        <div className="chip-row">
+          <span
+            className={`chip ${(validation.gates as { overallClaimable?: boolean }).overallClaimable ? "ok" : "hot"}`}
+          >
+            Overall {(validation.gates as { overallClaimable?: boolean }).overallClaimable ? "claimable" : "undefined"}
+            {" · "}
+            n={String((validation.gates as { resolvedCount?: number }).resolvedCount ?? 0)}/
+            {String((validation.gates as { overallMinResolved?: number }).overallMinResolved ?? 100)}
+          </span>
+          <span
+            className={`chip ${(validation.gates as { calibrationSufficient?: boolean }).calibrationSufficient ? "ok" : "hot"}`}
+          >
+            Calibration{" "}
+            {(validation.gates as { calibrationSufficient?: boolean }).calibrationSufficient
+              ? "sufficient"
+              : "insufficient"}
+          </span>
+          <span className="chip">
+            Config {(validation.gates as { locked?: boolean }).locked ? "LOCKED" : "unlocked"} ·{" "}
+            {String((validation.gates as { activeConfigVersion?: string }).activeConfigVersion ?? "").slice(0, 8)}
+          </span>
+        </div>
+      ) : null}
+      {validation?.gates &&
+      !(validation.gates as { overallClaimable?: boolean }).overallClaimable ? (
+        <p className="disclaimer sell">
+          Accuracy undefined until resolved TP/SL sample reaches the Phase 8 floor. Do not treat
+          confidence % as win probability.
+        </p>
+      ) : null}
       {validation?.breakRetestPerformance || validation?.performance ? (
         <>
           <div className="metric-grid">
@@ -968,7 +1092,7 @@ function SignalBoard({
               </strong>
             </div>
           </div>
-          <div className="desk-kicker">Overall paper (all setups)</div>
+          <div className="desk-kicker">Overall paper (active config)</div>
           <div className="metric-grid">
             <div className="metric">
               <span>Resolved TP/SL</span>
@@ -992,7 +1116,39 @@ function SignalBoard({
               <span>Open paper</span>
               <strong>{String(validation.openTrades ?? "-")}</strong>
             </div>
+            <div className="metric">
+              <span>Profit factor</span>
+              <strong>
+                {fmtExpectancy(
+                  (validation.performance as { profitFactor?: number | null }).profitFactor,
+                )}
+              </strong>
+            </div>
+            <div className="metric">
+              <span>Max DD</span>
+              <strong>
+                {fmtExpectancy(
+                  (validation.performance as { maxDrawdown?: number | null }).maxDrawdown,
+                )}
+              </strong>
+            </div>
+            <div className="metric">
+              <span>Avg MFE</span>
+              <strong>
+                {fmtExpectancy((validation.performance as { averageMfe?: number | null }).averageMfe)}
+              </strong>
+            </div>
+            <div className="metric">
+              <span>Avg MAE</span>
+              <strong>
+                {fmtExpectancy((validation.performance as { averageMae?: number | null }).averageMae)}
+              </strong>
+            </div>
           </div>
+          <div className="desk-kicker">By regime</div>
+          {claimableTable(validation.byRegime as Record<string, PerfSlice> | undefined)}
+          <div className="desk-kicker">By setup class</div>
+          {claimableTable(validation.bySetupClass as Record<string, PerfSlice> | undefined)}
           <div className="desk-kicker">Strata</div>
           <div className="chip-row">
             {strataChips(validation.byPrimaryTimeframe as Record<string, PerfSlice> | undefined, "TF")}
@@ -1009,13 +1165,25 @@ function SignalBoard({
       ) : (
         <p className="disclaimer">Validation report loading…</p>
       )}
-      {validation?.phaseFNote ? (
-        <p className="disclaimer">{String(validation.phaseFNote)}</p>
+      {validation?.phase8Note || validation?.phaseFNote ? (
+        <p className="disclaimer">
+          {String(validation.phase8Note ?? validation.phaseFNote)}
+        </p>
       ) : (
         <p className="disclaimer">
-          Phase F scoreboard — falsify RANGE_BREAK_RETEST; do not raise live size on thin samples.
+          Phase 8 accuracy freeze — do not raise live size on thin samples.
         </p>
       )}
+      {validation?.phase11Note ? (
+        <p className="disclaimer">{String(validation.phase11Note)}</p>
+      ) : null}
+      {Array.isArray((validation?.gates as { notes?: string[] } | undefined)?.notes)
+        ? ((validation!.gates as { notes: string[] }).notes).map((note) => (
+            <p key={note} className="disclaimer">
+              {note}
+            </p>
+          ))
+        : null}
       {validation?.calibration ? (
         <p className="disclaimer">
           {String((validation.calibration as { sampleNote?: string }).sampleNote ?? "")}
@@ -1024,8 +1192,64 @@ function SignalBoard({
       {validation?.parity ? (
         <p className="disclaimer">
           Tape: {String((validation.parity as { tape?: string }).tape ?? "")}
+          {(validation.parity as { configLock?: string }).configLock
+            ? ` · ${String((validation.parity as { configLock?: string }).configLock)}`
+            : ""}
         </p>
       ) : null}
+      <div className="desk-kicker">Phase 9 — Tape OF parity</div>
+      <div className="chip-row">
+        <span className={`chip ${parity?.green ? "ok" : "hot"}`}>
+          {parity?.green ? "Tape green" : "No tape"} · {String((parity?.tape as { count?: number } | undefined)?.count ?? 0)} ticks
+        </span>
+        <span className="chip">
+          Status {String(parity?.status ?? "…")}
+        </span>
+        <span className="chip hot">fullEngineParity=false (no DOM archive)</span>
+        <button
+          type="button"
+          className="chip"
+          disabled={!symbol || parityBusy}
+          onClick={() => void runParity()}
+        >
+          {parityBusy ? "Replaying…" : "Run tape OF replay"}
+        </button>
+      </div>
+      {parityError ? <p className="disclaimer sell">{parityError}</p> : null}
+      {parity?.replay ? (
+        <div className="metric-grid">
+          <div className="metric">
+            <span>Ticks used</span>
+            <strong>{String((parity.tape as { ticksUsed?: number }).ticksUsed ?? "-")}</strong>
+          </div>
+          <div className="metric">
+            <span>Replay closes</span>
+            <strong>
+              {String((parity.replay as { trades?: unknown[] }).trades?.length ?? 0)}
+            </strong>
+          </div>
+          <div className="metric">
+            <span>Matched</span>
+            <strong>{String((parity.compare as { matched?: number } | null)?.matched ?? 0)}</strong>
+          </div>
+          <div className="metric">
+            <span>Outcome agree</span>
+            <strong>
+              {(parity.compare as { outcomeAgreeRate?: number | null } | null)?.outcomeAgreeRate ==
+              null
+                ? "n/a"
+                : `${(((parity.compare as { outcomeAgreeRate: number }).outcomeAgreeRate) * 100).toFixed(0)}%`}
+            </strong>
+          </div>
+        </div>
+      ) : null}
+      {Array.isArray(parity?.notes)
+        ? (parity!.notes as string[]).slice(0, 4).map((note) => (
+            <p key={note.slice(0, 48)} className="disclaimer">
+              {note}
+            </p>
+          ))
+        : null}
       <div className="desk-kicker">Historical backtest (structure proxy)</div>
       <div className="chip-row">
         <button type="button" className="chip" disabled={!symbol || btBusy} onClick={() => void runBacktest()}>
@@ -1403,6 +1627,11 @@ type PerfSlice = {
   winRate?: number | null;
   winRateCi95?: { low: number; high: number } | null;
   expectancy?: number | null;
+  profitFactor?: number | null;
+  maxDrawdown?: number | null;
+  averageMfe?: number | null;
+  averageMae?: number | null;
+  claimable?: boolean;
 };
 
 function fmtWinRate(p?: PerfSlice): string {
@@ -1428,6 +1657,39 @@ function strataChips(
       {prefix} {key}: {fmtWinRate(slice)} · E {fmtExpectancy(slice.expectancy)}
     </span>
   ));
+}
+
+function claimableTable(map: Record<string, PerfSlice> | undefined): ReactNode {
+  const entries = map ? Object.entries(map) : [];
+  if (entries.length === 0) return <p className="disclaimer">No rows yet</p>;
+  return (
+    <table className="table">
+      <thead>
+        <tr>
+          <th>Key</th>
+          <th>n</th>
+          <th>Win rate</th>
+          <th>Expectancy</th>
+          <th>PF</th>
+          <th>Claimable</th>
+        </tr>
+      </thead>
+      <tbody>
+        {entries.map(([key, slice]) => (
+          <tr key={key}>
+            <td>{key}</td>
+            <td>{slice.closedTrades ?? 0}</td>
+            <td>{fmtWinRate(slice)}</td>
+            <td>{fmtExpectancy(slice.expectancy)}</td>
+            <td>{fmtExpectancy(slice.profitFactor)}</td>
+            <td className={slice.claimable ? "buy" : "sell"}>
+              {slice.claimable ? "yes" : "no"}
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
 }
 
 function scenarioKindShort(kind: TradeScenario["kind"]): string {
@@ -1463,4 +1725,143 @@ function trendClass(value?: string): string {
   if (text.includes("bull") || text === "up") return "up";
   if (text.includes("bear") || text === "down") return "down";
   return "";
+}
+
+function SettingsPanel({ onClose }: { onClose: () => void }) {
+  const [health, setHealth] = useState<Record<string, unknown> | null>(null);
+  const [secrets, setSecrets] = useState<
+    { name: string; masked: string; updatedAt: number; present: boolean }[]
+  >([]);
+  const [name, setName] = useState("BINANCE_API_KEY");
+  const [value, setValue] = useState("");
+  const [oldKey, setOldKey] = useState("");
+  const [msg, setMsg] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  const refresh = async () => {
+    try {
+      const [h, s] = await Promise.all([fetchHealth(), fetchSecrets()]);
+      setHealth(h);
+      setSecrets(s.secrets);
+      setErr(null);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  useEffect(() => {
+    void refresh();
+  }, []);
+
+  const save = async () => {
+    try {
+      await putSecret(name, value);
+      setValue("");
+      setMsg(`Saved ${name} (masked only in UI)`);
+      await refresh();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const rotate = async () => {
+    try {
+      const r = await rotateSecrets(oldKey);
+      setMsg(`Re-encrypted ${r.rotated} secret(s) with current ENCRYPTION_KEY`);
+      setOldKey("");
+      await refresh();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const ws = health?.ws as
+    | { connected?: boolean; lagMs?: number | null; lastError?: string | null }
+    | undefined;
+  const catalog = health?.catalog as
+    | { ageMs?: number | null; lastError?: string | null; instruments?: number }
+    | undefined;
+  const tls = health?.tls as { mode?: string; detail?: string } | undefined;
+
+  return (
+    <section className="panel" style={{ margin: "8px 12px" }}>
+      <div className="of-head" style={{ display: "flex", justifyContent: "space-between" }}>
+        <h3 style={{ margin: 0 }}>Settings — ops & secrets</h3>
+        <button type="button" className="chip" onClick={onClose}>
+          Close
+        </button>
+      </div>
+      <div className="panel-body">
+        <div className="desk-kicker">Health</div>
+        <div className="metric-grid">
+          <div className="metric">
+            <span>Exchange</span>
+            <strong>{String(health?.exchange ?? "-")}</strong>
+          </div>
+          <div className="metric">
+            <span>WS lag</span>
+            <strong>{ws?.lagMs == null ? "n/a" : `${ws.lagMs} ms`}</strong>
+          </div>
+          <div className="metric">
+            <span>Catalog age</span>
+            <strong>{catalog?.ageMs == null ? "n/a" : `${Math.round(catalog.ageMs / 1000)}s`}</strong>
+          </div>
+          <div className="metric">
+            <span>TLS</span>
+            <strong>{tls?.mode ?? "-"}</strong>
+          </div>
+        </div>
+        {ws?.lastError ? <p className="disclaimer sell">WS: {ws.lastError}</p> : null}
+        {catalog?.lastError ? <p className="disclaimer sell">Catalog: {catalog.lastError}</p> : null}
+        {tls?.detail ? <p className="disclaimer">{tls.detail}</p> : null}
+        <p className="disclaimer">Prometheus text: GET /metrics</p>
+
+        <div className="desk-kicker">Encrypted secrets (server-only)</div>
+        <ul className="list">
+          {secrets.map((s) => (
+            <li key={s.name}>
+              {s.name}: {s.masked}
+            </li>
+          ))}
+          {secrets.length === 0 && <li>No secrets stored yet</li>}
+        </ul>
+        <div className="chip-row" style={{ flexWrap: "wrap", gap: 8 }}>
+          <select value={name} onChange={(e) => setName(e.target.value)} aria-label="Secret name">
+            <option value="BINANCE_API_KEY">BINANCE_API_KEY</option>
+            <option value="BINANCE_API_SECRET">BINANCE_API_SECRET</option>
+            <option value="BYBIT_API_KEY">BYBIT_API_KEY</option>
+            <option value="BYBIT_API_SECRET">BYBIT_API_SECRET</option>
+          </select>
+          <input
+            type="password"
+            value={value}
+            placeholder="New value"
+            onChange={(e) => setValue(e.target.value)}
+            aria-label="Secret value"
+          />
+          <button type="button" className="chip" onClick={() => void save()}>
+            Save encrypted
+          </button>
+        </div>
+        <div className="chip-row" style={{ flexWrap: "wrap", gap: 8, marginTop: 8 }}>
+          <input
+            type="password"
+            value={oldKey}
+            placeholder="Previous ENCRYPTION_KEY"
+            onChange={(e) => setOldKey(e.target.value)}
+            aria-label="Old encryption key"
+          />
+          <button type="button" className="chip" onClick={() => void rotate()}>
+            Rotate encryption
+          </button>
+        </div>
+        {msg ? <p className="disclaimer">{msg}</p> : null}
+        {err ? <p className="disclaimer sell">{err}</p> : null}
+        <p className="disclaimer">
+          Secrets never render in plaintext. Set EXCHANGE=okx|binance|bybit in server .env (restart
+          required). Prefer TLS_CA_FILE / NODE_EXTRA_CA_CERTS over TLS_INSECURE.
+        </p>
+      </div>
+    </section>
+  );
 }

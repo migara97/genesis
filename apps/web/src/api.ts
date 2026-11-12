@@ -112,6 +112,79 @@ export async function updateRisk(patch: Partial<RiskConfig>) {
   );
 }
 
+export async function fetchAlerts(symbol?: string) {
+  const search = new URLSearchParams();
+  if (symbol) search.set("symbol", symbol);
+  return json<{ alerts: AlertRule[] }>(await fetch(`/api/alerts?${search.toString()}`));
+}
+
+export async function fetchAlertFires(limit = 20) {
+  return json<{ fires: AlertFire[] }>(
+    await fetch(`/api/alerts?fired=1&limit=${limit}`),
+  );
+}
+
+export async function createAlert(body: {
+  symbol: string;
+  kind: "price" | "signal";
+  op?: "gte" | "lte" | "eq";
+  threshold?: number | null;
+  lifecycle?: string | null;
+}) {
+  return json(
+    await fetch("/api/alerts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  );
+}
+
+export async function deleteAlert(id: string) {
+  return json(await fetch(`/api/alerts/${encodeURIComponent(id)}`, { method: "DELETE" }));
+}
+
+export async function fetchLiveAudit(limit = 50) {
+  return json<{ entries: LiveAuditEntry[] }>(
+    await fetch(`/api/live-audit?limit=${limit}`),
+  );
+}
+
+export interface AlertRule {
+  id: string;
+  symbol: string;
+  kind: "price" | "signal";
+  op: "gte" | "lte" | "eq";
+  threshold: number | null;
+  lifecycle: string | null;
+  enabled: boolean;
+  createdAt: number;
+  lastFiredAt: number | null;
+  fireCount: number;
+}
+
+export interface AlertFire {
+  id: string;
+  alertId: string;
+  symbol: string;
+  kind: "price" | "signal";
+  message: string;
+  price: number | null;
+  lifecycle: string | null;
+  firedAt: number;
+}
+
+export interface LiveAuditEntry {
+  id: string;
+  ts: number;
+  action: string;
+  mode: string;
+  symbol: string | null;
+  side: string | null;
+  status: string | null;
+  reason: string | null;
+}
+
 export async function fetchSignalJournal(symbol?: string, limit = 20): Promise<{ setups: SignalSetupRow[] }> {
   const search = new URLSearchParams();
   if (symbol) search.set("symbol", symbol);
@@ -133,4 +206,46 @@ export async function fetchValidationReport(symbol?: string): Promise<Record<str
   const search = new URLSearchParams();
   if (symbol) search.set("symbol", symbol);
   return json(await fetch(`/api/validation/report?${search.toString()}`));
+}
+
+export async function fetchParityReport(
+  symbol?: string,
+  opts?: { run?: boolean; maxTicks?: number },
+): Promise<Record<string, unknown>> {
+  const search = new URLSearchParams();
+  if (symbol) search.set("symbol", symbol);
+  if (opts?.run) search.set("run", "1");
+  if (opts?.maxTicks != null) search.set("maxTicks", String(opts.maxTicks));
+  return json(await fetch(`/api/validation/parity?${search.toString()}`));
+}
+
+export async function fetchHealth(): Promise<Record<string, unknown>> {
+  return json(await fetch("/health"));
+}
+
+export async function fetchSecrets(): Promise<{
+  secrets: { name: string; masked: string; updatedAt: number; present: boolean }[];
+  note: string;
+}> {
+  return json(await fetch("/api/secrets"));
+}
+
+export async function putSecret(name: string, value: string): Promise<{ name: string; masked: string }> {
+  return json(
+    await fetch(`/api/secrets/${encodeURIComponent(name)}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ value }),
+    }),
+  );
+}
+
+export async function rotateSecrets(oldEncryptionKey: string): Promise<{ rotated: number }> {
+  return json(
+    await fetch("/api/secrets/rotate", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ oldEncryptionKey }),
+    }),
+  );
 }

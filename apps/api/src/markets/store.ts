@@ -282,6 +282,13 @@ export function setFavorite(exchange: string, symbol: string, favorite: boolean)
   db.prepare("DELETE FROM watchlist WHERE exchange = ? AND symbol = ?").run(exchange, normalized);
 }
 
+export function isFavorite(exchange: string, symbol: string): boolean {
+  const row = db
+    .prepare(`SELECT 1 AS ok FROM watchlist WHERE exchange = ? AND symbol = ?`)
+    .get(exchange, symbol.toUpperCase()) as { ok: number } | undefined;
+  return Boolean(row);
+}
+
 export function replaceCandleCache(
   exchange: string,
   symbol: string,

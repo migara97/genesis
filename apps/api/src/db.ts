@@ -45,6 +45,8 @@ function ensureColumn(table: string, column: string, ddl: string): void {
   db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
 }
 ensureColumn("paper_trades", "setup_class", "setup_class TEXT NOT NULL DEFAULT 'OTHER'");
+ensureColumn("paper_trades", "remaining_frac", "remaining_frac REAL NOT NULL DEFAULT 1");
+ensureColumn("paper_trades", "scale_fills", "scale_fills TEXT NOT NULL DEFAULT '[]'");
 
 export function saveOrder(order: unknown): void {
   const id = (order as { id: string }).id;

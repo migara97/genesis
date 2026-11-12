@@ -1,21 +1,20 @@
 import { EventEmitter } from "node:events";
-import {
-  BinanceFuturesMarketDataAdapter,
-  OkxSwapMarketDataAdapter,
-  type ExchangeMarketDataAdapter,
-} from "@of/exchange";
+import { createMarketDataAdapter, type ExchangeMarketDataAdapter } from "@of/exchange";
 import {
   applyTradeToCvd,
   analyzeMarketStructure,
+  buildCommentary,
   buildFootprintBar,
   buildMultiTimeframeContext,
   buildVolumeProfile,
   computeDomMetrics,
+  computeLeaderLagger,
   createCvdState,
   advanceBreakRetest,
   advanceScenarioTree,
   applySignalLifecycle,
   buildChartOverlay,
+  detectIcebergRefill,
   detectStructureZones,
   generateSignal,
   MTF_INTERVALS,
@@ -23,6 +22,8 @@ import {
   resolvePrimaryInterval,
   summarizeTimeframeStructure,
   type DeskPrimaryInterval,
+  type IcebergRefillSignal,
+  type LeaderLaggerReport,
 } from "@of/orderflow";
 import type {
   BreakRetestState,
@@ -34,6 +35,7 @@ import type {
   FootprintBar,
   MarketSnapshot,
   MarketStructureState,
+  MicrostructureSnapshot,
   MultiTimeframeContext,
   OrderBookSnapshot,
   ScenarioTreeState,
@@ -43,7 +45,8 @@ import type {
   VolumeProfile,
 } from "@of/shared";
 import { config } from "./config.js";
-import { getTickerStats } from "./markets/store.js";
+import { evaluateAlerts } from "./alerts/store.js";
+import { getTickerStats, listMarkets } from "./markets/store.js";
 import { recordSignalLifecycle } from "./signals/journal.js";
 import { syncPaperTradeFromLifecycle } from "./validation/paperLedger.js";
 import { archiveTradeTick } from "./validation/tapeArchive.js";
@@ -61,8 +64,7 @@ const MTF_CANDLE_LIMITS: Record<string, number> = {
 const MTF_REFRESH_MS = 5 * 60_000;
 
 function createMarketAdapter(): ExchangeMarketDataAdapter {
-  if (config.exchange === "binance") return new BinanceFuturesMarketDataAdapter();
-  return new OkxSwapMarketDataAdapter();
+  return createMarketDataAdapter(config.exchange);
 }
 
 interface SymbolState {
@@ -85,10 +87,14 @@ interface SymbolState {
   breakRetest?: BreakRetestState;
   scenarios?: ScenarioTreeState;
   signal?: TradingSignal;
+  iceberg?: IcebergRefillSignal;
+  leaderLagger?: LeaderLaggerReport;
+  microstructure?: MicrostructureSnapshot;
   lastPrice: number;
   primaryInterval: DeskPrimaryInterval;
   health: ConnectionHealth;
   mtfRefreshTimer?: NodeJS.Timeout;
+  leaderLaggerAt?: number;
 }
 
 /**
@@ -106,6 +112,11 @@ export class MarketHub extends EventEmitter {
   private primaryInterval: DeskPrimaryInterval = resolvePrimaryInterval(PRIMARY_INTERVAL);
   /** Coalesce high-frequency trade/book updates so each symbol publishes at most ~5 Hz. */
   private snapshotTimers = new Map<string, NodeJS.Timeout>();
+  /** Phase 8: rotate OF focus across DEFAULT_SYMBOLS. */
+  private rotationTimer: NodeJS.Timeout | null = null;
+  private rotationIndex = 0;
+  /** Phase 12: throttle favorites alert evaluation per symbol. */
+  private alertEvalAt = new Map<string, number>();
 
   getPrimaryInterval(): DeskPrimaryInterval {
     return this.primaryInterval;
@@ -149,6 +160,41 @@ export class MarketHub extends EventEmitter {
     return [...this.states.keys()];
   }
 
+  /**
+   * Phase 8 sample growth: rotate focus across DEFAULT_SYMBOLS on an interval.
+   * Only the focused symbol gets live OF / TP-SL updates; others wait until rotated back.
+   */
+  startFocusRotation(log?: { info: (obj: object, msg: string) => void }): void {
+    if (this.rotationTimer) {
+      clearInterval(this.rotationTimer);
+      this.rotationTimer = null;
+    }
+    const ms = config.focusRotationMs;
+    if (!ms || ms <= 0 || config.symbols.length < 2) {
+      log?.info(
+        { focusRotationMs: ms, symbols: config.symbols.length },
+        "focus rotation disabled",
+      );
+      return;
+    }
+    log?.info(
+      { focusRotationMs: ms, symbols: config.symbols },
+      "Phase 8 focus rotation enabled",
+    );
+    this.rotationTimer = setInterval(() => {
+      this.rotationIndex = (this.rotationIndex + 1) % config.symbols.length;
+      const next = config.symbols[this.rotationIndex];
+      if (next) void this.focus(next);
+    }, ms);
+  }
+
+  stopFocusRotation(): void {
+    if (this.rotationTimer) {
+      clearInterval(this.rotationTimer);
+      this.rotationTimer = null;
+    }
+  }
+
   setTickSize(symbol: string, tickSize: number): void {
     if (tickSize > 0) this.tickSizes.set(symbol.toUpperCase(), tickSize);
   }
@@ -160,6 +206,8 @@ export class MarketHub extends EventEmitter {
     const normalized = symbol.trim().toUpperCase();
     if (!normalized) return;
     if (primaryInterval != null) this.setPrimaryInterval(primaryInterval);
+    const rotIdx = config.symbols.indexOf(normalized);
+    if (rotIdx >= 0) this.rotationIndex = rotIdx;
     const gen = ++this.generation;
     if (this.retryTimer) {
       clearTimeout(this.retryTimer);
@@ -270,10 +318,16 @@ export class MarketHub extends EventEmitter {
       chartOverlay: s.chartOverlay,
       breakRetest: s.breakRetest,
       scenarios: s.scenarios,
+      microstructure: s.microstructure,
       signal: s.signal,
       recentTrades: s.trades.slice(-80),
       health: s.health,
     };
+  }
+
+  getMicrostructure(symbol: string): MicrostructureSnapshot | null {
+    const s = this.states.get(symbol.toUpperCase());
+    return s?.microstructure ?? null;
   }
 
   listSnapshots(): MarketSnapshot[] {
@@ -323,9 +377,93 @@ export class MarketHub extends EventEmitter {
     if (!state) return;
     state.book = book;
     state.dom = computeDomMetrics(book);
+    const iceberg = detectIcebergRefill(book);
+    state.iceberg = iceberg;
+    if (state.dom) {
+      state.dom = {
+        ...state.dom,
+        iceberg: {
+          side: iceberg.side,
+          price: iceberg.price,
+          refillCount: iceberg.refillCount,
+          confidence: iceberg.confidence,
+          note: iceberg.note,
+        },
+        evidence: [...state.dom.evidence, ...iceberg.evidence],
+      };
+    }
     if (state.dom.mid) state.lastPrice = state.dom.mid;
+    this.recomputeMicrostructure(book.symbol);
     this.recomputeSignal(book.symbol);
     this.publish(book.symbol);
+  }
+
+  private refreshLeaderLagger(symbol: string): void {
+    const state = this.states.get(symbol);
+    if (!state) return;
+    const now = Date.now();
+    if (state.leaderLaggerAt && now - state.leaderLaggerAt < 30_000) return;
+    try {
+      const page = listMarkets({
+        exchange: config.exchange,
+        status: "live",
+        sort: "volume",
+        limit: 80,
+      });
+      state.leaderLagger = computeLeaderLagger({
+        focus: symbol,
+        peers: page.items.map((item) => ({
+          symbol: item.symbol,
+          changePct24h: item.changePct24h,
+          volume24h: item.volume24h,
+        })),
+      });
+      state.leaderLaggerAt = now;
+    } catch {
+      // Catalog may be empty during first boot.
+    }
+  }
+
+  private recomputeMicrostructure(symbol: string): void {
+    const state = this.states.get(symbol);
+    if (!state) return;
+    this.refreshLeaderLagger(symbol);
+    const commentary = buildCommentary({
+      signal: state.signal,
+      iceberg: state.iceberg,
+      leaderLagger: state.leaderLagger,
+      lastPrice: state.lastPrice,
+    });
+    state.microstructure = {
+      iceberg: state.iceberg
+        ? {
+            side: state.iceberg.side,
+            price: state.iceberg.price,
+            refillCount: state.iceberg.refillCount,
+            confidence: state.iceberg.confidence,
+            note: state.iceberg.note,
+          }
+        : undefined,
+      leaderLagger: state.leaderLagger
+        ? {
+            role: state.leaderLagger.role,
+            confidence: state.leaderLagger.confidence,
+            note: state.leaderLagger.note,
+            focusChangePct24h: state.leaderLagger.focusChangePct24h,
+          }
+        : undefined,
+      commentary: {
+        text: commentary.text,
+        source: "template",
+        mutatesScores: false,
+      },
+    };
+    if (state.signal) {
+      state.signal = {
+        ...state.signal,
+        commentary: state.microstructure.commentary,
+      };
+    }
   }
 
   private onHealth(health: ConnectionHealth): void {
@@ -550,9 +688,25 @@ export class MarketHub extends EventEmitter {
           quoteVolume24h: ticker?.volume24h ?? undefined,
         },
       });
+      const lifecycleChanged =
+        previous?.lifecycle !== state.signal.lifecycle ||
+        (previous?.tpHits ?? 0) !== (state.signal.tpHits ?? 0);
+      const lastEval = this.alertEvalAt.get(symbol) ?? 0;
+      const due = now - lastEval >= 5_000;
+      if (lifecycleChanged || previous == null || due) {
+        this.alertEvalAt.set(symbol, now);
+        const fires = evaluateAlerts({
+          symbol,
+          price: state.lastPrice,
+          lifecycle: lifecycleChanged || previous == null ? state.signal.lifecycle : undefined,
+          setupId: state.signal.setupId,
+        });
+        for (const fire of fires) this.emit("alert", fire);
+      }
     } catch (err) {
       this.emit("error", err);
     }
+    this.recomputeMicrostructure(symbol);
   }
 }
 

@@ -16,6 +16,7 @@ import type {
   VolumeProfile,
 } from "@of/shared";
 import { priceInZone } from "./priceZones.js";
+import { applyConfirmationPacks } from "./strategyPlugins.js";
 import { buildStructureTargets } from "./structureTargets.js";
 
 export interface SignalInput {
@@ -79,6 +80,11 @@ export interface SignalEngineConfig {
   confidenceDivisor: number;
   multiConfirmBonus: number;
   waitConfidenceCap: number;
+  /**
+   * Phase 11: merge registered strategy packs as weight-0 neutrals.
+   * Default false — does not change confirmation gates or A+.
+   */
+  enableStrategyPlugins?: boolean;
 }
 
 export const DEFAULT_SIGNAL_CONFIG: SignalEngineConfig = {
@@ -111,6 +117,7 @@ export const DEFAULT_SIGNAL_CONFIG: SignalEngineConfig = {
   confidenceDivisor: 5,
   multiConfirmBonus: 0.15,
   waitConfidenceCap: 0.35,
+  enableStrategyPlugins: false,
 };
 
 /** Legacy multi-confirm gates only (used by tests / opt-out). */
@@ -616,6 +623,18 @@ export function generateSignal(
         reason: "Elevated spoofing-risk heuristic on DOM — treat walls cautiously.",
       });
     }
+    if (dom.iceberg && dom.iceberg.side !== "none" && dom.iceberg.confidence >= 0.4) {
+      addNeutral({
+        id: "dom_iceberg_refill",
+        family: "orderflow",
+        source: "heuristic",
+        reason: dom.iceberg.note,
+      });
+      evidence.push({
+        kind: "heuristic",
+        note: "Iceberg/refill confidence is a heuristic band — not exchange iceberg tags.",
+      });
+    }
   }
 
   // Volume profile location + nodes
@@ -839,6 +858,17 @@ export function generateSignal(
     entryQualityNotes.push("Standard multi-confirm gates only (A+ profile disabled).");
   } else {
     entryQualityNotes.push("No directional setup after base gates.");
+  }
+
+  // Phase 11 plugins: weight-0 neutrals only — never bump long/short or A+ flags.
+  if (config.enableStrategyPlugins) {
+    const pack = applyConfirmationPacks(input);
+    for (const f of pack.factors) {
+      factors.push(f);
+      if (f.side === "neutral") reasonsAgainst.push(f.reason);
+    }
+    evidence.push(...pack.evidence);
+    reasonsAgainst.push(...pack.reasonsAgainst);
   }
 
   const confidenceRaw =

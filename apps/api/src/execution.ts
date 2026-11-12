@@ -1,16 +1,19 @@
 import { randomUUID } from "node:crypto";
 import { BinanceFuturesTradingAdapter } from "@of/exchange";
-import { validateOrderRisk } from "@of/orderflow";
+import { resolveBinanceCredentials } from "./secrets/store.js";
+import { applySizingProfile, validateOrderRisk } from "@of/orderflow";
 import type {
   ExecutionMode,
   OrderRecord,
   PlaceOrderRequest,
   Position,
   RiskConfig,
+  SizingProfile,
 } from "@of/shared";
 import { DEFAULT_RISK_CONFIG } from "@of/shared";
 import { config } from "./config.js";
 import { getMeta, listOrders, saveOrder, setMeta } from "./db.js";
+import { appendLiveAudit } from "./execution/liveAudit.js";
 import { marketHub } from "./marketHub.js";
 
 const FEE_BPS = 4; // 0.04% taker assumption for paper
@@ -32,7 +35,18 @@ export class ExecutionService {
   }
 
   setRisk(patch: Partial<RiskConfig>): RiskConfig {
-    this.risk = { ...this.risk, ...patch };
+    let next = { ...this.risk, ...patch };
+    if (patch.sizingProfile != null) {
+      next = applySizingProfile(next, patch.sizingProfile as SizingProfile);
+      // Re-apply explicit overrides that came with the same patch.
+      if (patch.riskPercentPerTrade != null) {
+        next.riskPercentPerTrade = patch.riskPercentPerTrade;
+      }
+      if (patch.minEntryGrade != null) {
+        next.minEntryGrade = patch.minEntryGrade;
+      }
+    }
+    this.risk = next;
     setMeta("risk", this.risk);
     this.peakEquity = Math.max(this.peakEquity, this.risk.accountEquity);
     return this.getRisk();
@@ -43,8 +57,11 @@ export class ExecutionService {
       if (!confirmLiveTrading) {
         throw new Error("LIVE mode requires confirmLiveTrading=true");
       }
-      if (!config.binanceApiKey || !config.binanceApiSecret) {
-        throw new Error("LIVE mode requires BINANCE_API_KEY and BINANCE_API_SECRET on server");
+      const creds = resolveBinanceCredentials();
+      if (!creds.apiKey || !creds.apiSecret) {
+        throw new Error(
+          "LIVE mode requires Binance keys via encrypted secrets store or BINANCE_API_KEY/SECRET env",
+        );
       }
       this.liveConfirmed = true;
     } else {
@@ -52,6 +69,11 @@ export class ExecutionService {
     }
     this.mode = mode;
     setMeta("executionMode", mode);
+    appendLiveAudit({
+      action: "mode",
+      mode,
+      reason: mode === "LIVE" ? "LIVE enabled with confirmation" : `Switched to ${mode}`,
+    });
     return this.mode;
   }
 
@@ -96,8 +118,8 @@ export class ExecutionService {
 
     const entry =
       request.type === "LIMIT" && request.price != null ? request.price : snap.lastPrice;
-    const stop = request.stopPrice;
-    const tp = undefined;
+    const stop = request.stopPrice ?? snap.signal?.stopLoss ?? undefined;
+    const tp = snap.signal?.takeProfit?.[0];
 
     const decision = validateOrderRisk({
       config: this.risk,
@@ -108,6 +130,7 @@ export class ExecutionService {
       openPositions: this.listPositions(),
       dayPnl: this.dayPnl,
       peakEquity: this.peakEquity,
+      entryGrade: snap.signal?.entryGrade,
     });
 
     if (!decision.allowed) {
@@ -126,7 +149,7 @@ export class ExecutionService {
       quantity,
       filledQuantity: 0,
       price: request.price,
-      stopPrice: request.stopPrice,
+      stopPrice: request.stopPrice ?? stop,
       status: "NEW",
       fees: 0,
       createdAt: now,
@@ -138,9 +161,10 @@ export class ExecutionService {
     }
 
     // LIVE
+    const creds = resolveBinanceCredentials();
     const trading = new BinanceFuturesTradingAdapter({
-      apiKey: config.binanceApiKey,
-      apiSecret: config.binanceApiSecret,
+      apiKey: creds.apiKey,
+      apiSecret: creds.apiSecret,
     });
     try {
       const balances = await trading.getBalance();
@@ -164,6 +188,16 @@ export class ExecutionService {
       order.updatedAt = Date.now();
       this.applyFillToPosition(order);
       saveOrder(order);
+      appendLiveAudit({
+        action: "place",
+        mode: "LIVE",
+        symbol: order.symbol,
+        side: order.side,
+        type: order.type,
+        quantity: order.quantity,
+        status: order.status,
+        exchangeOrderId: order.exchangeOrderId,
+      });
       return order;
     } catch (err) {
       return this.reject(request, (err as Error).message);
@@ -176,11 +210,22 @@ export class ExecutionService {
     if (!order) return null;
     if (order.status === "FILLED" || order.status === "CANCELED") return order;
     if (order.mode === "LIVE" && order.exchangeOrderId) {
+      const creds = resolveBinanceCredentials();
       const trading = new BinanceFuturesTradingAdapter({
-        apiKey: config.binanceApiKey,
-        apiSecret: config.binanceApiSecret,
+        apiKey: creds.apiKey,
+        apiSecret: creds.apiSecret,
       });
       await trading.cancelOrder(order.symbol, order.exchangeOrderId);
+      appendLiveAudit({
+        action: "cancel",
+        mode: "LIVE",
+        symbol: order.symbol,
+        side: order.side,
+        type: order.type,
+        quantity: order.quantity,
+        status: "CANCELED",
+        exchangeOrderId: order.exchangeOrderId,
+      });
     }
     order.status = "CANCELED";
     order.updatedAt = Date.now();
@@ -269,6 +314,18 @@ export class ExecutionService {
       rejectReason: reason,
     };
     saveOrder(order);
+    if (this.mode === "LIVE") {
+      appendLiveAudit({
+        action: "reject",
+        mode: "LIVE",
+        symbol: order.symbol,
+        side: order.side,
+        type: order.type,
+        quantity: order.quantity,
+        status: "REJECTED",
+        reason,
+      });
+    }
     return order;
   }
 }

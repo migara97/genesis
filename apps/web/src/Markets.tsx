@@ -105,10 +105,10 @@ export function Markets({ selected, onSelect }: Props) {
               <th>Price</th>
               <th>24h</th>
               <th>Volume</th>
-              <th>Bid</th>
-              <th>Ask</th>
-              <th>High</th>
-              <th>Low</th>
+              <th className="markets-col-extra">Bid</th>
+              <th className="markets-col-extra">Ask</th>
+              <th className="markets-col-extra">High</th>
+              <th className="markets-col-extra">Low</th>
             </tr>
           </thead>
           <tbody>
@@ -142,10 +142,10 @@ export function Markets({ selected, onSelect }: Props) {
                   {row.changePct24h == null ? "-" : `${row.changePct24h.toFixed(2)}%`}
                 </td>
                 <td>{fmtVol(row.volume24h)}</td>
-                <td>{fmt(row.bid)}</td>
-                <td>{fmt(row.ask)}</td>
-                <td>{fmt(row.high24h)}</td>
-                <td>{fmt(row.low24h)}</td>
+                <td className="markets-col-extra">{fmt(row.bid)}</td>
+                <td className="markets-col-extra">{fmt(row.ask)}</td>
+                <td className="markets-col-extra">{fmt(row.high24h)}</td>
+                <td className="markets-col-extra">{fmt(row.low24h)}</td>
               </tr>
             ))}
           </tbody>

@@ -1,4 +1,5 @@
 import type { MarketRegimeTag, PaperOutcome, PaperSetupClass } from "@of/shared";
+import { PHASE8_GATES } from "./versions.js";
 
 export interface ClosedTradeSample {
   setupId: string;
@@ -20,6 +21,77 @@ export interface ClosedTradeSample {
   regimeTags: MarketRegimeTag[];
   setupClass?: PaperSetupClass;
   primaryTimeframe?: string;
+  configVersion?: string;
+}
+
+export interface AccuracyGates {
+  overallClaimable: boolean;
+  calibrationSufficient: boolean;
+  byRegimeClaimable: Record<string, boolean>;
+  bySetupClassClaimable: Record<string, boolean>;
+  activeConfigVersion: string;
+  locked: boolean;
+  resolvedCount: number;
+  overallMinResolved: number;
+  stratumMinResolved: number;
+  notes: string[];
+}
+
+/** Phase 8 publishing gates — do not claim expectancy/edge until overallClaimable. */
+export function evaluateAccuracyGates(args: {
+  performance: PerformanceReport;
+  calibration: CalibrationReport;
+  byRegime: Record<string, PerformanceReport>;
+  bySetupClass: Record<string, PerformanceReport>;
+  activeConfigVersion: string;
+  locked: boolean;
+  overallMin?: number;
+  stratumMin?: number;
+}): AccuracyGates {
+  const overallMin = args.overallMin ?? PHASE8_GATES.overallMinResolved;
+  const stratumMin = args.stratumMin ?? PHASE8_GATES.stratumMinResolved;
+  const resolvedCount = args.performance.closedTrades;
+  const overallClaimable = resolvedCount >= overallMin;
+  const byRegimeClaimable: Record<string, boolean> = {};
+  for (const [key, perf] of Object.entries(args.byRegime)) {
+    byRegimeClaimable[key] = perf.closedTrades >= stratumMin;
+  }
+  const bySetupClassClaimable: Record<string, boolean> = {};
+  for (const [key, perf] of Object.entries(args.bySetupClass)) {
+    bySetupClassClaimable[key] = perf.closedTrades >= stratumMin;
+  }
+  const notes: string[] = [];
+  if (args.locked) {
+    notes.push(`Config locked to fingerprint ${args.activeConfigVersion}.`);
+  }
+  if (!overallClaimable) {
+    notes.push(
+      `Overall not claimable (${resolvedCount}/${overallMin} resolved TP/SL). Accuracy undefined.`,
+    );
+  } else {
+    notes.push(`Overall claimable at n=${resolvedCount} (floor ${overallMin}).`);
+  }
+  if (!args.calibration.sufficient) {
+    notes.push("Calibration insufficient — do not treat confidence as win probability.");
+  }
+  const claimableRegimes = Object.entries(byRegimeClaimable).filter(([, v]) => v).map(([k]) => k);
+  if (claimableRegimes.length === 0) {
+    notes.push(`No regime stratum claimable yet (need ≥${stratumMin} resolved each).`);
+  } else {
+    notes.push(`Claimable regimes: ${claimableRegimes.join(", ")}.`);
+  }
+  return {
+    overallClaimable,
+    calibrationSufficient: args.calibration.sufficient,
+    byRegimeClaimable,
+    bySetupClassClaimable,
+    activeConfigVersion: args.activeConfigVersion,
+    locked: args.locked,
+    resolvedCount,
+    overallMinResolved: overallMin,
+    stratumMinResolved: stratumMin,
+    notes,
+  };
 }
 
 export interface PerformanceReport {

@@ -21,6 +21,17 @@ import { config } from "../config.js";
 const CONFIG_VERSION = fingerprintConfig({});
 const TERMINAL = new Set(["HIT_TP", "HIT_SL", "INVALIDATED", "EXPIRED", "TIMEOUT"]);
 
+export interface ScaleFillLeg {
+  tpIndex: number;
+  price: number;
+  fraction: number;
+  at: number;
+  grossPnl: number;
+  fees: number;
+  funding: number;
+  netPnl: number;
+}
+
 export interface PaperTradeRow {
   id: string;
   setupId: string;
@@ -53,11 +64,14 @@ export interface PaperTradeRow {
   engineVersion: string;
   configVersion: string;
   regimeTags: MarketRegimeTag[];
+  remainingFrac?: number;
+  scaleFills?: ScaleFillLeg[];
 }
 
 /**
  * Sync paper ledger from lifecycle transitions.
- * Opens on first CONFIRMED/ACTIVE directional; closes on terminal once.
+ * Opens on first CONFIRMED/ACTIVE directional; records Phase 12 partial TP legs;
+ * closes on terminal once.
  */
 export function syncPaperTradeFromLifecycle(args: {
   previous?: TradingSignal | null;
@@ -86,8 +100,24 @@ export function syncPaperTradeFromLifecycle(args: {
 
   const exchange = args.exchange ?? config.exchange;
   const existing = db
-    .prepare("SELECT setup_id, outcome, mfe, mae FROM paper_trades WHERE setup_id = ?")
-    .get(next.setupId) as { setup_id: string; outcome: string; mfe: number | null; mae: number | null } | undefined;
+    .prepare(
+      "SELECT setup_id, outcome, mfe, mae, remaining_frac, scale_fills, gross_pnl, fees, funding, net_pnl, opened_at FROM paper_trades WHERE setup_id = ?",
+    )
+    .get(next.setupId) as
+    | {
+        setup_id: string;
+        outcome: string;
+        mfe: number | null;
+        mae: number | null;
+        remaining_frac: number | null;
+        scale_fills: string | null;
+        gross_pnl: number | null;
+        fees: number | null;
+        funding: number | null;
+        net_pnl: number | null;
+        opened_at: number;
+      }
+    | undefined;
 
   const side = next.direction as "LONG" | "SHORT";
   const now = next.lifecycleUpdatedAt ?? next.timestamp;
@@ -163,8 +193,8 @@ export function syncPaperTradeFromLifecycle(args: {
         take_profit, exit_price, exit_fill, confidence, long_score, short_score, families,
         confirmations, regime_tags, engine_version, config_version, gross_pnl, fees, funding,
         net_pnl, r_multiple, mfe, mae, hold_ms, ambiguous_same_bar, of_snapshot, signal_payload,
-        updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, NULL, ?, ?, ?, NULL, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0, ?, ?, ?)
+        remaining_frac, scale_fills, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, NULL, ?, ?, ?, NULL, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0, ?, ?, 1, '[]', ?)
       `,
     ).run(
       `paper-${next.setupId}`,
@@ -194,14 +224,108 @@ export function syncPaperTradeFromLifecycle(args: {
       JSON.stringify({ signal: next, snapshot }),
       now,
     );
-    return;
+    // Fall through — opening tick may also be a scale fill if lifecycle already advanced.
   }
 
-  if (!existing || existing.outcome !== "OPEN") return;
+  const openRow =
+    existing?.outcome === "OPEN"
+      ? existing
+      : (db
+          .prepare(
+            "SELECT setup_id, outcome, mfe, mae, remaining_frac, scale_fills, gross_pnl, fees, funding, net_pnl, opened_at FROM paper_trades WHERE setup_id = ? AND outcome = 'OPEN'",
+          )
+          .get(next.setupId) as typeof existing);
+
+  if (!openRow || openRow.outcome !== "OPEN") return;
+
+  const prevHits = args.previous?.tpHits ?? 0;
+  const nextHits = next.tpHits ?? 0;
+  const isPartialScale =
+    nextHits > prevHits &&
+    (next.lifecycle === "ACTIVE" || next.lifecycle === "CONFIRMED") &&
+    !TERMINAL.has(next.lifecycle);
+
+  if (isPartialScale) {
+    const fills = parseScaleFills(openRow.scale_fills);
+    const remaining = openRow.remaining_frac ?? 1;
+    const noteFrac = parseScaleFracFromNote(next.lifecycleNote);
+    const frac =
+      noteFrac ??
+      Math.max(0, remaining - (next.scaleRemainingFrac ?? remaining));
+    if (frac > 0) {
+      const costs = computeCostedPnl({
+        side,
+        entry: next.entry,
+        exit: args.price,
+        stopLoss: next.stopLoss,
+        openedAt: openRow.opened_at,
+        closedAt: now,
+        sizeFraction: frac,
+        config: args.costs ?? DEFAULT_COST_MODEL,
+      });
+      fills.push({
+        tpIndex: nextHits,
+        price: args.price,
+        fraction: frac,
+        at: now,
+        grossPnl: costs.grossPnlPerUnit,
+        fees: costs.feesPerUnit,
+        funding: costs.fundingPerUnit,
+        netPnl: costs.netPnlPerUnit,
+      });
+      const nextRemaining = Math.max(0, remaining - frac);
+      const gross = (openRow.gross_pnl ?? 0) + costs.grossPnlPerUnit;
+      const fees = (openRow.fees ?? 0) + costs.feesPerUnit;
+      const funding = (openRow.funding ?? 0) + costs.fundingPerUnit;
+      const net = (openRow.net_pnl ?? 0) + costs.netPnlPerUnit;
+      const risk = Math.abs(next.entry - next.stopLoss);
+      const rMultiple = risk > 0 ? net / risk : null;
+      db.prepare(
+        `
+        UPDATE paper_trades SET
+          lifecycle = ?,
+          remaining_frac = ?,
+          scale_fills = ?,
+          gross_pnl = ?,
+          fees = ?,
+          funding = ?,
+          net_pnl = ?,
+          r_multiple = ?,
+          exit_price = ?,
+          signal_payload = ?,
+          updated_at = ?
+        WHERE setup_id = ? AND outcome = 'OPEN'
+        `,
+      ).run(
+        next.lifecycle,
+        nextRemaining,
+        JSON.stringify(fills),
+        gross,
+        fees,
+        funding,
+        net,
+        rMultiple,
+        args.price,
+        JSON.stringify({ signal: next, scaleFills: fills, costed: costs }),
+        now,
+        next.setupId,
+      );
+      // Refresh openRow numbers for a possible same-tick terminal (shouldn't happen).
+      openRow.remaining_frac = nextRemaining;
+      openRow.scale_fills = JSON.stringify(fills);
+      openRow.gross_pnl = gross;
+      openRow.fees = fees;
+      openRow.funding = funding;
+      openRow.net_pnl = net;
+    }
+  }
+
   if (!TERMINAL.has(next.lifecycle)) return;
 
   const outcome = mapOutcome(next.lifecycle);
-  const openedAt = next.setupOpenedAt ?? next.timestamp;
+  const openedAt = next.setupOpenedAt ?? openRow.opened_at ?? next.timestamp;
+  const remaining = openRow.remaining_frac ?? 1;
+  const fills = parseScaleFills(openRow.scale_fills);
   const costs = computeCostedPnl({
     side,
     entry: next.entry,
@@ -209,9 +333,19 @@ export function syncPaperTradeFromLifecycle(args: {
     stopLoss: next.stopLoss,
     openedAt,
     closedAt: now,
+    sizeFraction: Math.max(0, remaining),
     config: args.costs ?? DEFAULT_COST_MODEL,
   });
   const isResolved = outcome === "HIT_TP" || outcome === "HIT_SL";
+  const includePnl =
+    isResolved || outcome === "TIMEOUT" || outcome === "INVALIDATED" || outcome === "EXPIRED";
+
+  const gross = includePnl ? (openRow.gross_pnl ?? 0) + costs.grossPnlPerUnit : openRow.gross_pnl;
+  const fees = includePnl ? (openRow.fees ?? 0) + costs.feesPerUnit : openRow.fees;
+  const funding = includePnl ? (openRow.funding ?? 0) + costs.fundingPerUnit : openRow.funding;
+  const net = includePnl ? (openRow.net_pnl ?? 0) + costs.netPnlPerUnit : openRow.net_pnl;
+  const risk = Math.abs(next.entry - next.stopLoss);
+  const rMultiple = includePnl && net != null && risk > 0 ? net / risk : null;
 
   db.prepare(
     `
@@ -228,6 +362,8 @@ export function syncPaperTradeFromLifecycle(args: {
       net_pnl = ?,
       r_multiple = ?,
       hold_ms = ?,
+      remaining_frac = 0,
+      scale_fills = ?,
       signal_payload = ?,
       updated_at = ?
     WHERE setup_id = ? AND outcome = 'OPEN'
@@ -239,15 +375,14 @@ export function syncPaperTradeFromLifecycle(args: {
     args.price,
     costs.entryFill,
     costs.exitFill,
-    isResolved || outcome === "TIMEOUT" || outcome === "INVALIDATED" || outcome === "EXPIRED"
-      ? costs.grossPnlPerUnit
-      : null,
-    costs.feesPerUnit,
-    costs.fundingPerUnit,
-    costs.netPnlPerUnit,
-    costs.rMultiple,
+    gross,
+    fees,
+    funding,
+    net,
+    rMultiple,
     now - openedAt,
-    JSON.stringify({ signal: next, costed: costs }),
+    JSON.stringify(fills),
+    JSON.stringify({ signal: next, scaleFills: fills, costed: costs }),
     now,
     next.setupId,
   );
@@ -258,7 +393,7 @@ export function listPaperTrades(opts: {
   limit?: number;
   setupClass?: PaperSetupClass;
 }): PaperTradeRow[] {
-  const limit = Math.min(Math.max(opts.limit ?? 50, 1), 500);
+  const limit = Math.min(Math.max(opts.limit ?? 50, 1), 10_000);
   let rows: Record<string, unknown>[];
   if (opts.symbol && opts.setupClass) {
     rows = db
@@ -289,6 +424,25 @@ function mapOutcome(lifecycle: string): PaperOutcome {
   if (lifecycle === "TIMEOUT") return "TIMEOUT";
   if (lifecycle === "EXPIRED") return "EXPIRED";
   return "OPEN";
+}
+
+function parseScaleFills(raw: string | null | undefined): ScaleFillLeg[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as ScaleFillLeg[];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Note format: `SCALE_TP1:0.5|...` */
+function parseScaleFracFromNote(note?: string): number | null {
+  if (!note) return null;
+  const m = /^SCALE_TP\d+:([0-9.]+)/.exec(note);
+  if (!m) return null;
+  const n = Number(m[1]);
+  return Number.isFinite(n) && n > 0 ? n : null;
 }
 
 function updateExtrema(
@@ -340,5 +494,7 @@ function mapRow(row: Record<string, unknown>): PaperTradeRow {
     engineVersion: String(row.engine_version),
     configVersion: String(row.config_version),
     regimeTags: JSON.parse(String(row.regime_tags || "[]")) as MarketRegimeTag[],
+    remainingFrac: row.remaining_frac == null ? undefined : Number(row.remaining_frac),
+    scaleFills: parseScaleFills(row.scale_fills as string | null),
   };
 }

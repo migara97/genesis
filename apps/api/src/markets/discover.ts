@@ -198,10 +198,11 @@ export function parseBinanceTickers(
 }
 
 export async function discoverMarkets(
-  exchange: "okx" | "binance",
+  exchange: "okx" | "binance" | "bybit",
   fetchImpl: typeof fetch = fetch,
 ): Promise<{ instruments: DiscoveredInstrument[]; tickers: DiscoveredTicker[] }> {
   if (exchange === "binance") return discoverBinance(fetchImpl);
+  if (exchange === "bybit") return discoverBybit(fetchImpl);
   return discoverOkx(fetchImpl);
 }
 
@@ -235,6 +236,99 @@ async function discoverBinance(fetchImpl: typeof fetch) {
       (Array.isArray(books) ? books : []) as BinanceBook[],
     ),
   };
+}
+
+interface BybitInstrument {
+  symbol?: string;
+  status?: string;
+  baseCoin?: string;
+  quoteCoin?: string;
+  contractType?: string;
+  priceFilter?: { tickSize?: string };
+  lotSizeFilter?: { qtyStep?: string };
+}
+
+interface BybitTicker {
+  symbol?: string;
+  lastPrice?: string;
+  price24hPcnt?: string;
+  highPrice24h?: string;
+  lowPrice24h?: string;
+  turnover24h?: string;
+  bid1Price?: string;
+  ask1Price?: string;
+  prevPrice24h?: string;
+}
+
+async function discoverBybit(fetchImpl: typeof fetch) {
+  const [instrumentsJson, tickersJson] = await Promise.all([
+    getJson(fetchImpl, "https://api.bybit.com/v5/market/instruments-info?category=linear&limit=1000"),
+    getJson(fetchImpl, "https://api.bybit.com/v5/market/tickers?category=linear"),
+  ]);
+  if (Number(instrumentsJson.retCode) !== 0) {
+    throw new Error(`Bybit instruments error: ${String(instrumentsJson.retMsg ?? instrumentsJson.retCode)}`);
+  }
+  if (Number(tickersJson.retCode) !== 0) {
+    throw new Error(`Bybit tickers error: ${String(tickersJson.retMsg ?? tickersJson.retCode)}`);
+  }
+  const instrumentList =
+    ((instrumentsJson.result as { list?: BybitInstrument[] } | undefined)?.list ?? []) as BybitInstrument[];
+  const tickerList =
+    ((tickersJson.result as { list?: BybitTicker[] } | undefined)?.list ?? []) as BybitTicker[];
+  return {
+    instruments: parseBybitInstruments(instrumentList),
+    tickers: parseBybitTickers(tickerList),
+  };
+}
+
+function parseBybitInstruments(rows: BybitInstrument[]): DiscoveredInstrument[] {
+  const out: DiscoveredInstrument[] = [];
+  for (const row of rows) {
+    const symbol = (row.symbol ?? "").toUpperCase();
+    if (!symbol || !symbol.endsWith("USDT")) continue;
+    if (row.contractType && row.contractType !== "LinearPerpetual") continue;
+    out.push({
+      exchange: "bybit",
+      symbol,
+      baseAsset: (row.baseCoin ?? symbol.replace(/USDT$/, "")).toUpperCase(),
+      quoteAsset: (row.quoteCoin ?? "USDT").toUpperCase(),
+      status: mapBybitStatus(row.status),
+      tickSize: positive(row.priceFilter?.tickSize, 0.01),
+      lotSize: positive(row.lotSizeFilter?.qtyStep, 0.001),
+      contractType: "linear_perp",
+    });
+  }
+  return out;
+}
+
+function parseBybitTickers(rows: BybitTicker[]): DiscoveredTicker[] {
+  const out: DiscoveredTicker[] = [];
+  for (const row of rows) {
+    const symbol = (row.symbol ?? "").toUpperCase();
+    const last = Number(row.lastPrice);
+    if (!symbol || !Number.isFinite(last)) continue;
+    const prev = Number(row.prevPrice24h);
+    const changePct = Number(row.price24hPcnt);
+    const change24h = Number.isFinite(prev) ? last - prev : Number.isFinite(changePct) ? last * changePct : 0;
+    out.push({
+      symbol,
+      lastPrice: last,
+      change24h,
+      changePct24h: Number.isFinite(changePct) ? changePct * 100 : 0,
+      volume24h: finite(row.turnover24h),
+      high24h: finite(row.highPrice24h),
+      low24h: finite(row.lowPrice24h),
+      bid: finite(row.bid1Price),
+      ask: finite(row.ask1Price),
+    });
+  }
+  return out;
+}
+
+function mapBybitStatus(status?: string): InstrumentStatus {
+  if (status === "Trading") return "live";
+  if (status === "Closed" || status === "Settling") return "delisted";
+  return "suspended";
 }
 
 async function getJson(fetchImpl: typeof fetch, url: string): Promise<Record<string, unknown>> {

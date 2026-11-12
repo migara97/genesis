@@ -1,7 +1,12 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { DEFAULT_RISK_CONFIG } from "@of/shared";
-import { calculatePositionSize, validateOrderRisk } from "./risk.js";
+import {
+  applySizingProfile,
+  calculatePositionSize,
+  resolveSizingProfile,
+  validateOrderRisk,
+} from "./risk.js";
 
 describe("risk engine", () => {
   it("sizes position from equity and stop distance", () => {
@@ -36,5 +41,50 @@ describe("risk engine", () => {
     });
     assert.equal(decision.allowed, false);
     assert.match(decision.reason ?? "", /Risk-reward/);
+  });
+
+  it("maps sizing profiles to risk % and min grade", () => {
+    assert.deepEqual(resolveSizingProfile("conservative"), {
+      riskPercentPerTrade: 0.25,
+      minEntryGrade: "A+",
+    });
+    assert.deepEqual(resolveSizingProfile("aggressive"), {
+      riskPercentPerTrade: 1.0,
+      minEntryGrade: "STANDARD",
+    });
+    const cfg = applySizingProfile(DEFAULT_RISK_CONFIG, "conservative");
+    assert.equal(cfg.riskPercentPerTrade, 0.25);
+    assert.equal(cfg.minEntryGrade, "A+");
+  });
+
+  it("rejects STANDARD grade under conservative profile", () => {
+    const decision = validateOrderRisk({
+      config: applySizingProfile(DEFAULT_RISK_CONFIG, "conservative"),
+      request: { symbol: "BTCUSDT", side: "BUY", type: "MARKET", quantity: 1 },
+      entry: 100,
+      stop: 99,
+      takeProfit: 103,
+      openPositions: [],
+      dayPnl: 0,
+      peakEquity: 100_000,
+      entryGrade: "STANDARD",
+    });
+    assert.equal(decision.allowed, false);
+    assert.match(decision.reason ?? "", /A\+/);
+  });
+
+  it("allows A+ under conservative profile", () => {
+    const decision = validateOrderRisk({
+      config: applySizingProfile(DEFAULT_RISK_CONFIG, "conservative"),
+      request: { symbol: "BTCUSDT", side: "BUY", type: "MARKET", quantity: 1 },
+      entry: 100,
+      stop: 99,
+      takeProfit: 103,
+      openPositions: [],
+      dayPnl: 0,
+      peakEquity: 100_000,
+      entryGrade: "A+",
+    });
+    assert.equal(decision.allowed, true);
   });
 });

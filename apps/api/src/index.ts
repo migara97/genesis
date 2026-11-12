@@ -3,11 +3,14 @@ import cors from "@fastify/cors";
 import websocket from "@fastify/websocket";
 import { z } from "zod";
 import type { PlaceOrderRequest } from "@of/shared";
+import { createMarketDataAdapter } from "@of/exchange";
 import { config } from "./config.js";
+import { applyTlsEnv } from "./tls.js";
+import { setTlsInfo, buildHealthPayload, buildPrometheusMetrics } from "./ops/status.js";
+import { listSecretsMasked, rotateEncryption, upsertSecret } from "./secrets/store.js";
 import { executionService } from "./execution.js";
 import { marketHub } from "./marketHub.js";
 import { runSignalBacktest } from "./backtest.js";
-import { BinanceFuturesMarketDataAdapter, OkxSwapMarketDataAdapter } from "@of/exchange";
 import { startMarketSync } from "./markets/sync.js";
 import {
   getInstrument,
@@ -18,26 +21,60 @@ import {
 } from "./markets/store.js";
 import { getScannerSnapshot, startAltScanner } from "./scanner/runner.js";
 import { computeJournalMetrics, listSignalSetups } from "./signals/journal.js";
+import {
+  createAlert,
+  deleteAlert,
+  listAlertFires,
+  listAlerts,
+} from "./alerts/store.js";
+import { listLiveAudit } from "./execution/liveAudit.js";
 import { listPaperTrades } from "./validation/paperLedger.js";
+import { runParityReport } from "./validation/parityRunner.js";
 import { buildValidationReport } from "./validation/report.js";
-import { tapeCoverageNote } from "./validation/tapeArchive.js";
+
+const tlsBoot = applyTlsEnv();
+setTlsInfo(tlsBoot);
 
 const app = Fastify({
   logger: { level: config.logLevel },
 });
+app.log.info({ tls: tlsBoot }, "TLS bootstrap");
 
 await app.register(cors, { origin: true });
 await app.register(websocket);
 
-app.get("/health", async () => ({
-  ok: true,
-  mode: executionService.getMode(),
-  symbols: marketHub.streamingSymbols(),
-  configuredSymbols: config.symbols,
-  exchange: config.exchange,
-  dataPolicy:
-    "Live public market data via modular exchange adapters (OKX default, Binance optional). Aggressor flags are exchange-reported when provided. Institutional identity is never claimed.",
+app.get("/health", async () => buildHealthPayload(executionService.getMode()));
+
+app.get("/metrics", async (_req, reply) => {
+  reply.type("text/plain; version=0.0.4");
+  return buildPrometheusMetrics(executionService.getMode());
+});
+
+app.get("/api/secrets", async () => ({
+  secrets: listSecretsMasked(),
+  note: "Values are masked. Plaintext never returned to the client.",
 }));
+
+app.put("/api/secrets/:name", async (req, reply) => {
+  const name = (req.params as { name: string }).name.toUpperCase();
+  const body = z.object({ value: z.string().min(1) }).parse(req.body);
+  try {
+    return upsertSecret(name, body.value);
+  } catch (err) {
+    return reply.code(400).send({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+app.post("/api/secrets/rotate", async (req, reply) => {
+  const body = z.object({ oldEncryptionKey: z.string().min(1) }).parse(req.body);
+  try {
+    return rotateEncryption(body.oldEncryptionKey);
+  } catch (err) {
+    return reply
+      .code(400)
+      .send({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
 
 app.get("/api/snapshots", async () => marketHub.listSnapshots());
 app.get("/api/snapshots/:symbol", async (req, reply) => {
@@ -45,6 +82,27 @@ app.get("/api/snapshots/:symbol", async (req, reply) => {
   const snap = marketHub.getSnapshot(symbol);
   if (!snap) return reply.code(404).send({ error: "Symbol not streaming" });
   return snap;
+});
+
+app.get("/api/microstructure", async (req, reply) => {
+  const q = req.query as { symbol?: string };
+  const symbol = (q.symbol ?? config.symbols[0] ?? "BTCUSDT").toUpperCase();
+  const micro = marketHub.getMicrostructure(symbol);
+  const snap = marketHub.getSnapshot(symbol);
+  if (!micro && !snap) {
+    return reply.code(404).send({
+      error: "Symbol not streaming — focus a market first",
+      symbol,
+    });
+  }
+  return {
+    symbol,
+    exchange: config.exchange,
+    microstructure: micro ?? snap?.microstructure ?? null,
+    domIceberg: snap?.dom?.iceberg ?? null,
+    phase11Note:
+      "Iceberg/refill and leader/lagger are heuristics with confidence bands. Commentary never mutates signal scores.",
+  };
 });
 
 app.get("/api/scanner", async () => getScannerSnapshot());
@@ -152,15 +210,61 @@ app.post("/api/watchlist", async (req, reply) => {
   return { symbol: instrument.symbol, favorite: body.favorite };
 });
 
+app.get("/api/alerts", async (req) => {
+  const q = req.query as { symbol?: string; fired?: string; limit?: string };
+  if (q.fired === "1" || q.fired === "true") {
+    return { fires: listAlertFires(q.limit ? Number(q.limit) : 50) };
+  }
+  return {
+    alerts: listAlerts({
+      symbol: q.symbol,
+    }),
+  };
+});
+
+app.post("/api/alerts", async (req, reply) => {
+  const body = z
+    .object({
+      symbol: z.string().min(3).max(40),
+      kind: z.enum(["price", "signal"]),
+      op: z.enum(["gte", "lte", "eq"]).optional(),
+      threshold: z.number().optional().nullable(),
+      lifecycle: z.string().optional().nullable(),
+      enabled: z.boolean().optional(),
+    })
+    .parse(req.body);
+  const instrument = getInstrument(config.exchange, body.symbol);
+  if (!instrument) return reply.code(404).send({ error: "Unknown symbol" });
+  if (body.kind === "price" && body.threshold == null) {
+    return reply.code(400).send({ error: "price alerts require threshold" });
+  }
+  return createAlert({
+    symbol: instrument.symbol,
+    kind: body.kind,
+    op: body.op,
+    threshold: body.threshold,
+    lifecycle: body.lifecycle,
+    enabled: body.enabled,
+  });
+});
+
+app.delete("/api/alerts/:id", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  if (!deleteAlert(id)) return reply.code(404).send({ error: "Alert not found" });
+  return { ok: true };
+});
+
+app.get("/api/live-audit", async (req) => {
+  const q = req.query as { limit?: string };
+  return { entries: listLiveAudit(q.limit ? Number(q.limit) : 100) };
+});
+
 app.get("/api/markets/:symbol/candles", async (req, reply) => {
   const symbol = (req.params as { symbol: string }).symbol.toUpperCase();
   const interval = ((req.query as { interval?: string }).interval ?? "5m").toLowerCase();
   const allowed = new Set(["1m", "3m", "5m", "15m", "1h", "4h", "1d"]);
   if (!allowed.has(interval)) return reply.code(400).send({ error: "Unsupported interval" });
-  const adapter =
-    config.exchange === "binance"
-      ? new BinanceFuturesMarketDataAdapter()
-      : new OkxSwapMarketDataAdapter();
+  const adapter = createMarketDataAdapter(config.exchange);
   const candles = await adapter.fetchKlines(symbol, interval, 200);
   replaceCandleCache(config.exchange, symbol, interval, candles);
   return { symbol, interval, source: "exchange_reported", candles };
@@ -183,12 +287,15 @@ app.get("/api/signals/metrics", async (req) => {
 });
 
 app.get("/api/validation/report", async (req) => {
-  const q = req.query as { symbol?: string; setupClass?: string };
+  const q = req.query as { symbol?: string; setupClass?: string; allConfigs?: string };
   const setupClass =
     q.setupClass === "RANGE_BREAK_RETEST" || q.setupClass === "OTHER"
       ? q.setupClass
       : undefined;
-  return buildValidationReport(q.symbol?.toUpperCase(), { setupClass });
+  return buildValidationReport(q.symbol?.toUpperCase(), {
+    setupClass,
+    allConfigs: q.allConfigs === "1" || q.allConfigs === "true",
+  });
 });
 
 app.get("/api/validation/paper-trades", async (req) => {
@@ -207,33 +314,46 @@ app.get("/api/validation/paper-trades", async (req) => {
   };
 });
 
+/** Phase 8: reject runtime signal-weight overrides while the freeze is on. */
+app.post("/api/validation/signal-config", async (_req, reply) => {
+  if (config.validationLockConfig) {
+    return reply.code(403).send({
+      error: "VALIDATION_LOCK_CONFIG is enabled — signal weights cannot be changed during Phase 8.",
+      locked: true,
+    });
+  }
+  return reply.code(400).send({
+    error: "Runtime signal-config overrides are not implemented; edit DEFAULT_SIGNAL_CONFIG in source after unlocking.",
+    locked: false,
+  });
+});
+
 app.get("/api/validation/parity", async (req) => {
-  const q = req.query as { symbol?: string };
-  const symbol = (q.symbol ?? config.symbols[0] ?? "BTCUSDT").toUpperCase();
-  return {
-    symbol,
-    exchange: config.exchange,
-    tape: tapeCoverageNote(symbol, config.exchange),
-    live: {
-      gates: { minIndependent: 2, minScore: 2, domRequiresTradeDelta: true },
-      inputs: ["structure", "mtf", "zones", "cvd", "footprint", "dom", "volumeProfile"],
-    },
-    historicalDefaultBacktest: {
-      structureOnlyMode: true,
-      inputs: ["structure", "mtf"],
-      limitation:
-        "Default /api/backtest is a structure/MTF proxy — not full live Order Flow parity. Do not claim complete-engine edge from it.",
-    },
+  const q = req.query as {
+    symbol?: string;
+    run?: string;
+    from?: string;
+    to?: string;
+    maxTicks?: string;
   };
+  const symbol = (q.symbol ?? config.symbols[0] ?? "BTCUSDT").toUpperCase();
+  const fromTs = q.from != null && Number.isFinite(Number(q.from)) ? Number(q.from) : undefined;
+  const toTs = q.to != null && Number.isFinite(Number(q.to)) ? Number(q.to) : undefined;
+  const maxTicks =
+    q.maxTicks != null && Number.isFinite(Number(q.maxTicks)) ? Number(q.maxTicks) : undefined;
+  return runParityReport({
+    symbol,
+    runReplay: q.run === "1" || q.run === "true",
+    fromTs,
+    toTs,
+    maxTicks,
+  });
 });
 
 app.get("/api/backtest/:symbol", async (req) => {
   const symbol = (req.params as { symbol: string }).symbol.toUpperCase();
   const q = req.query as { feeBps?: string; slippageBps?: string };
-  const adapter =
-    config.exchange === "binance"
-      ? new BinanceFuturesMarketDataAdapter()
-      : new OkxSwapMarketDataAdapter();
+  const adapter = createMarketDataAdapter(config.exchange);
   const [primary, d1, h4, h1, soft] = await Promise.all([
     adapter.fetchKlines(symbol, "5m", 300),
     adapter.fetchKlines(symbol, "1d", 120),
@@ -286,8 +406,10 @@ app.register(async (instance) => {
 
     const onSnap = (snap: unknown) => send("snapshot", snap);
     const onHealth = (health: unknown) => send("health", health);
+    const onAlert = (fire: unknown) => send("alert", fire);
     marketHub.on("snapshot", onSnap);
     marketHub.on("health", onHealth);
+    marketHub.on("alert", onAlert);
 
     socket.on("message", (raw) => {
       try {
@@ -319,6 +441,7 @@ app.register(async (instance) => {
     socket.on("close", () => {
       marketHub.off("snapshot", onSnap);
       marketHub.off("health", onHealth);
+      marketHub.off("alert", onAlert);
     });
   });
 });
@@ -337,6 +460,7 @@ try {
     `Order Flow API listening on ${config.host}:${config.port} mode=${executionService.getMode()} streaming=${initialSymbol} exchange=${config.exchange}`,
   );
   void marketHub.focus(initialSymbol);
+  marketHub.startFocusRotation(app.log);
   startMarketSync(app.log);
   startAltScanner(app.log);
 } catch (err) {

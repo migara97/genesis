@@ -1,7 +1,6 @@
 import type { FastifyBaseLogger } from "fastify";
 import {
-  BinanceFuturesMarketDataAdapter,
-  OkxSwapMarketDataAdapter,
+  createMarketDataAdapter,
   type ExchangeMarketDataAdapter,
 } from "@of/exchange";
 import {
@@ -33,8 +32,7 @@ let cache: ScannerSnapshot = {
 };
 
 function createAdapter(): ExchangeMarketDataAdapter {
-  if (config.exchange === "binance") return new BinanceFuturesMarketDataAdapter();
-  return new OkxSwapMarketDataAdapter();
+  return createMarketDataAdapter(config.exchange);
 }
 
 export function getScannerSnapshot(): ScannerSnapshot {

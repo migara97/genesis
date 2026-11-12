@@ -1109,4 +1109,31 @@ button.star {
     text-align: left;
     width: 100%;
   }
+
+  .app {
+    grid-template-rows: auto minmax(220px, 36vh) minmax(0, 1fr);
+    overflow: auto;
+  }
+
+  .desk-strip {
+    min-height: 220px;
+    overflow: auto;
+  }
+
+  .markets-bar {
+    flex-wrap: wrap;
+  }
+
+  .markets-bar input {
+    min-width: 0;
+    flex: 1 1 140px;
+  }
+
+  .markets-table {
+    min-height: 160px;
+  }
+
+  .markets-col-extra {
+    display: none;
+  }
 }

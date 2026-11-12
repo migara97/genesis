@@ -88,12 +88,37 @@ describe("applySignalLifecycle", () => {
     assert.equal(stopped.lifecycle, "HIT_SL");
   });
 
-  it("marks HIT_TP when price reaches first take-profit", () => {
+  it("marks HIT_TP when price reaches first take-profit (legacy fullCloseAtTp1)", () => {
     const signal = generateSignal({ ...longInput(95), timestamp: 1_000 }, std);
     const confirmed = applySignalLifecycle(undefined, signal, 95, 1_000);
     const tp = confirmed.takeProfit![0]!;
-    const hit = applySignalLifecycle(confirmed, signal, tp + 0.01, 2_000);
+    const hit = applySignalLifecycle(confirmed, signal, tp + 0.01, 2_000, {
+      ...DEFAULT_LIFECYCLE_CONFIG,
+      scaleOut: { enabled: true, fractions: [0.5, 0.3, 0.2], fullCloseAtTp1: true },
+    });
     assert.equal(hit.lifecycle, "HIT_TP");
+  });
+
+  it("scales out at TP1/TP2 then HIT_TP at TP3", () => {
+    const signal = generateSignal({ ...longInput(95), timestamp: 1_000 }, std);
+    let state = applySignalLifecycle(undefined, signal, 95, 1_000);
+    const tps = state.takeProfit ?? [];
+    assert.ok(tps.length >= 3, "fixture needs 3 TPs");
+
+    state = applySignalLifecycle(state, signal, tps[0]! + 0.01, 2_000);
+    assert.equal(state.lifecycle, "ACTIVE");
+    assert.equal(state.tpHits, 1);
+    assert.ok((state.scaleRemainingFrac ?? 1) < 1);
+    assert.match(state.lifecycleNote ?? "", /SCALE_TP1/);
+
+    state = applySignalLifecycle(state, signal, tps[1]! + 0.01, 3_000);
+    assert.equal(state.lifecycle, "ACTIVE");
+    assert.equal(state.tpHits, 2);
+
+    state = applySignalLifecycle(state, signal, tps[2]! + 0.01, 4_000);
+    assert.equal(state.lifecycle, "HIT_TP");
+    assert.equal(state.tpHits, 3);
+    assert.equal(state.scaleRemainingFrac, 0);
   });
 
   it("tags structure target hits without forcing HIT_TP", () => {

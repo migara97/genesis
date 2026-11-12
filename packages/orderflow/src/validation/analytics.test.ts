@@ -3,11 +3,13 @@ import assert from "node:assert/strict";
 import {
   computeCalibration,
   computePerformance,
+  evaluateAccuracyGates,
   groupByKey,
   wilsonInterval,
 } from "./analytics.js";
 import { computeCostedPnl } from "./costModel.js";
 import { resolvePathExit } from "./pathExit.js";
+import { PHASE8_GATES } from "./versions.js";
 import type { ClosedTradeSample } from "./analytics.js";
 
 function sample(partial: Partial<ClosedTradeSample> & { setupId: string }): ClosedTradeSample {
@@ -92,6 +94,63 @@ describe("validation analytics", () => {
     const cal = computeCalibration([]);
     assert.equal(cal.sufficient, false);
     assert.ok(/Insufficient/i.test(cal.sampleNote));
+  });
+
+  it("Phase 8 gates stay closed below overall and stratum floors", () => {
+    const thin = Array.from({ length: 10 }, (_, i) =>
+      sample({
+        setupId: `t${i}`,
+        regimeTags: ["bullish_trend"],
+        setupClass: "OTHER",
+        won: i % 2 === 0,
+        outcome: i % 2 === 0 ? "HIT_TP" : "HIT_SL",
+      }),
+    );
+    const performance = computePerformance(thin, 0);
+    const calibration = computeCalibration(thin);
+    const byRegime = groupByKey(thin, (s) => s.regimeTags);
+    const bySetupClass = groupByKey(thin, (s) => s.setupClass);
+    const gates = evaluateAccuracyGates({
+      performance,
+      calibration,
+      byRegime,
+      bySetupClass,
+      activeConfigVersion: "abc",
+      locked: true,
+    });
+    assert.equal(gates.overallClaimable, false);
+    assert.equal(gates.calibrationSufficient, false);
+    assert.equal(gates.byRegimeClaimable.bullish_trend, false);
+    assert.equal(gates.resolvedCount, 10);
+    assert.equal(gates.overallMinResolved, PHASE8_GATES.overallMinResolved);
+    assert.ok(gates.notes.some((n) => /undefined/i.test(n)));
+  });
+
+  it("Phase 8 overall gate opens at floor without inventing calibration", () => {
+    const fat = Array.from({ length: PHASE8_GATES.overallMinResolved }, (_, i) =>
+      sample({
+        setupId: `f${i}`,
+        regimeTags: ["sideways"],
+        setupClass: "RANGE_BREAK_RETEST",
+        confidence: 0.55,
+        won: true,
+        outcome: "HIT_TP",
+      }),
+    );
+    const performance = computePerformance(fat, 0);
+    const calibration = computeCalibration(fat);
+    const gates = evaluateAccuracyGates({
+      performance,
+      calibration,
+      byRegime: groupByKey(fat, (s) => s.regimeTags),
+      bySetupClass: groupByKey(fat, (s) => s.setupClass),
+      activeConfigVersion: "abc",
+      locked: true,
+    });
+    assert.equal(gates.overallClaimable, true);
+    assert.equal(gates.byRegimeClaimable.sideways, true);
+    assert.equal(gates.bySetupClassClaimable.RANGE_BREAK_RETEST, true);
+    assert.equal(gates.calibrationSufficient, calibration.sufficient);
   });
 
   it("groupByKey stratifies break/retest and TF", () => {

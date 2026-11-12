@@ -1,6 +1,14 @@
 import type { SignalLifecycle, TradingSignal } from "@of/shared";
 import { tagStructureTargetHits } from "./structureTargets.js";
 
+export interface ScaleOutConfig {
+  enabled: boolean;
+  /** Fractions closed at TP1/TP2/TP3 (should sum ≈ 1). */
+  fractions: number[];
+  /** When true, ignore fractions and full-close at TP1 (legacy). */
+  fullCloseAtTp1?: boolean;
+}
+
 export interface LifecycleConfig {
   /** Max age for PENDING_CONFIRM without becoming LONG/SHORT. */
   pendingMaxAgeMs: number;
@@ -8,12 +16,19 @@ export interface LifecycleConfig {
   activeMaxAgeMs: number;
   /** Hold terminal states to suppress duplicate re-alerts. */
   terminalHoldMs: number;
+  /** Phase 12 partial scale-out. */
+  scaleOut?: ScaleOutConfig;
 }
 
 export const DEFAULT_LIFECYCLE_CONFIG: LifecycleConfig = {
   pendingMaxAgeMs: 5 * 60_000,
   activeMaxAgeMs: 30 * 60_000,
   terminalHoldMs: 60_000,
+  scaleOut: {
+    enabled: true,
+    fractions: [0.5, 0.3, 0.2],
+    fullCloseAtTp1: false,
+  },
 };
 
 const TERMINAL: ReadonlySet<SignalLifecycle> = new Set([
@@ -154,7 +169,6 @@ function continueSetup(
   // Still LONG/SHORT for same setup.
   const stop = candidate.stopLoss ?? previous.stopLoss;
   const tps = candidate.takeProfit ?? previous.takeProfit ?? [];
-  const firstTp = tps[0];
   const side = candidate.direction;
   const preservedTargets = previous.structureTargets ?? candidate.structureTargets;
   const { targets: taggedTargets, newlyHit } = tagStructureTargetHits(
@@ -188,24 +202,50 @@ function continueSetup(
       );
     }
   }
-  if (firstTp != null) {
-    if (side === "LONG" && price >= firstTp) {
-      return withLifecycle(
-        mergeDirectional(previous, candidate, openedAt, taggedTargets),
-        "HIT_TP",
-        now,
-        openedAt,
-        `Price ${price} reached TP1 ${firstTp}.`,
-      );
-    }
-    if (side === "SHORT" && price <= firstTp) {
-      return withLifecycle(
-        mergeDirectional(previous, candidate, openedAt, taggedTargets),
-        "HIT_TP",
-        now,
-        openedAt,
-        `Price ${price} reached TP1 ${firstTp}.`,
-      );
+  const scale = config.scaleOut;
+  const scaleEnabled = Boolean(scale?.enabled) && !scale?.fullCloseAtTp1;
+  const fractions = scale?.fractions?.length ? scale.fractions : [0.5, 0.3, 0.2];
+  const tpHits = previous.tpHits ?? 0;
+  const remaining =
+    previous.scaleRemainingFrac ??
+    (fractions.slice(tpHits).reduce((a, b) => a + b, 0) || 1);
+
+  if (tps.length > 0 && tpHits < tps.length) {
+    const nextTp = tps[tpHits];
+    if (nextTp != null) {
+      const hit =
+        (side === "LONG" && price >= nextTp) || (side === "SHORT" && price <= nextTp);
+      if (hit) {
+        const frac = fractions[tpHits] ?? remaining;
+        const nextHits = tpHits + 1;
+        const nextRemaining = Math.max(0, remaining - frac);
+        const lastTp = nextHits >= tps.length || nextHits >= fractions.length || nextRemaining <= 1e-9;
+        if (!scaleEnabled || lastTp) {
+          return withLifecycle(
+            {
+              ...mergeDirectional(previous, candidate, openedAt, taggedTargets),
+              tpHits: nextHits,
+              scaleRemainingFrac: 0,
+            },
+            "HIT_TP",
+            now,
+            openedAt,
+            scaleEnabled
+              ? `Price ${price} reached TP${nextHits} ${nextTp}; scale-out complete.`
+              : `Price ${price} reached TP1 ${nextTp}.`,
+          );
+        }
+        // Partial: stay ACTIVE with updated scale state.
+        return {
+          ...mergeDirectional(previous, candidate, openedAt, taggedTargets),
+          lifecycle: previous.lifecycle === "CONFIRMED" ? "ACTIVE" : previous.lifecycle,
+          lifecycleUpdatedAt: now,
+          setupOpenedAt: openedAt,
+          tpHits: nextHits,
+          scaleRemainingFrac: nextRemaining,
+          lifecycleNote: `SCALE_TP${nextHits}:${frac}|Price ${price} filled TP${nextHits} ${nextTp}; remaining ${(nextRemaining * 100).toFixed(0)}%.`,
+        };
+      }
     }
   }
 
@@ -271,6 +311,9 @@ function mergeDirectional(
     riskReward: previous.riskReward ?? candidate.riskReward,
     structureTargets:
       structureTargets ?? previous.structureTargets ?? candidate.structureTargets,
+    // Phase 12 scale-out state must survive ACTIVE ticks that rebuild from candidate.
+    tpHits: previous.tpHits,
+    scaleRemainingFrac: previous.scaleRemainingFrac,
   };
 }
 

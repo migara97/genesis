@@ -170,6 +170,52 @@ CREATE INDEX IF NOT EXISTS idx_paper_trades_symbol
 CREATE INDEX IF NOT EXISTS idx_paper_trades_outcome
   ON paper_trades(outcome, closed_at);
 
+-- Phase 12: alert rules (favorites-gated at evaluate time).
+CREATE TABLE IF NOT EXISTS alerts (
+  id TEXT PRIMARY KEY,
+  symbol TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  op TEXT NOT NULL DEFAULT 'gte',
+  threshold REAL,
+  lifecycle TEXT,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  created_at INTEGER NOT NULL,
+  last_fired_at INTEGER,
+  fire_count INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_alerts_symbol ON alerts(symbol, enabled);
+
+CREATE TABLE IF NOT EXISTS alert_fires (
+  id TEXT PRIMARY KEY,
+  alert_id TEXT NOT NULL,
+  symbol TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  message TEXT NOT NULL,
+  price REAL,
+  lifecycle TEXT,
+  fired_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_alert_fires_ts ON alert_fires(fired_at DESC);
+
+-- Phase 12: LIVE submit audit (no secrets).
+CREATE TABLE IF NOT EXISTS live_audit (
+  id TEXT PRIMARY KEY,
+  ts INTEGER NOT NULL,
+  action TEXT NOT NULL,
+  mode TEXT NOT NULL,
+  symbol TEXT,
+  side TEXT,
+  type TEXT,
+  quantity REAL,
+  status TEXT,
+  exchange_order_id TEXT,
+  reason TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_live_audit_ts ON live_audit(ts DESC);
+
 -- Append-only trade tape for focused symbol (enables future full-OF replay).
 CREATE TABLE IF NOT EXISTS trade_tape (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

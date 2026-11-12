@@ -9,6 +9,18 @@ let timer: NodeJS.Timeout | null = null;
 let running = false;
 let cycles = 0;
 
+const status = {
+  lastSuccessAt: null as number | null,
+  lastErrorAt: null as number | null,
+  lastError: null as string | null,
+  instruments: 0,
+  tickers: 0,
+};
+
+export function getCatalogSyncStatus() {
+  return { ...status };
+}
+
 export function startMarketSync(log: FastifyBaseLogger): void {
   if (timer) return;
   const run = () => {
@@ -30,6 +42,7 @@ export async function syncOnce(log: FastifyBaseLogger): Promise<void> {
       for (const item of discovered.instruments) {
         marketHub.setTickSize(item.symbol, item.tickSize);
       }
+      status.instruments = result.upserted;
       log.info(
         {
           exchange: config.exchange,
@@ -41,8 +54,13 @@ export async function syncOnce(log: FastifyBaseLogger): Promise<void> {
       );
     }
     const tickers = syncTickers(config.exchange, discovered.tickers);
+    status.tickers = tickers;
+    status.lastSuccessAt = Date.now();
+    status.lastError = null;
     log.info({ exchange: config.exchange, tickers }, "market tickers synchronized");
   } catch (err) {
+    status.lastErrorAt = Date.now();
+    status.lastError = err instanceof Error ? err.message : String(err);
     log.error({ err }, "market catalog sync failed");
   } finally {
     running = false;

@@ -27,7 +27,29 @@ export interface DomMetrics {
   largeAskLevels: BookLevel[];
   pullStackHint: string;
   spoofingRisk: string;
+  iceberg?: {
+    side: string;
+    price: number | null;
+    refillCount: number;
+    confidence: number;
+    note: string;
+  };
   evidence: { kind: string; note: string }[];
+}
+
+export interface MicrostructureSnapshot {
+  iceberg?: DomMetrics["iceberg"];
+  leaderLagger?: {
+    role: string;
+    confidence: number;
+    note: string;
+    focusChangePct24h: number | null;
+  };
+  commentary?: {
+    text: string;
+    source: "template";
+    mutatesScores: false;
+  };
 }
 
 export interface FootprintCell {
@@ -328,6 +350,13 @@ export interface TradingSignal {
   /** A+ = selective checklist; STANDARD = multi-confirm only; WAIT = no setup. */
   entryGrade?: "A+" | "STANDARD" | "WAIT";
   entryQualityNotes?: string[];
+  commentary?: {
+    text: string;
+    source: "template";
+    mutatesScores: false;
+  };
+  tpHits?: number;
+  scaleRemainingFrac?: number;
   lifecycle?: SignalLifecycle;
   lifecycleUpdatedAt?: number;
   setupOpenedAt?: number;
@@ -447,6 +476,7 @@ export interface MarketSnapshot {
   chartOverlay?: ChartOverlayState;
   breakRetest?: BreakRetestState;
   scenarios?: ScenarioTreeState;
+  microstructure?: MicrostructureSnapshot;
   signal?: TradingSignal;
   recentTrades: TradeTick[];
   health: ConnectionHealth;
@@ -504,6 +534,8 @@ export interface Candle {
   volume: number;
 }
 
+export type SizingProfile = "conservative" | "standard" | "aggressive";
+
 export interface RiskConfig {
   riskPercentPerTrade: number;
   maxDailyLossPercent: number;
@@ -513,4 +545,6 @@ export interface RiskConfig {
   accountEquity: number;
   tradingEnabled: boolean;
   emergencyShutdown: boolean;
+  sizingProfile?: SizingProfile;
+  minEntryGrade?: "A+" | "STANDARD";
 }

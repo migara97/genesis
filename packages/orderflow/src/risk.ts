@@ -1,10 +1,49 @@
-import type { PlaceOrderRequest, Position, RiskConfig, Side } from "@of/shared";
+import type {
+  PlaceOrderRequest,
+  Position,
+  RiskConfig,
+  Side,
+  SizingProfile,
+} from "@of/shared";
 
 export interface RiskDecision {
   allowed: boolean;
   reason?: string;
   quantity: number;
   riskAmount: number;
+}
+
+export interface SizingProfileResolved {
+  riskPercentPerTrade: number;
+  minEntryGrade: "A+" | "STANDARD";
+}
+
+/** Phase 12: map sizing profile → risk % + minimum entry grade. */
+export function resolveSizingProfile(
+  profile: SizingProfile = "standard",
+): SizingProfileResolved {
+  switch (profile) {
+    case "conservative":
+      return { riskPercentPerTrade: 0.25, minEntryGrade: "A+" };
+    case "aggressive":
+      return { riskPercentPerTrade: 1.0, minEntryGrade: "STANDARD" };
+    default:
+      return { riskPercentPerTrade: 0.5, minEntryGrade: "STANDARD" };
+  }
+}
+
+/** Apply profile defaults onto a risk config (keeps explicit overrides). */
+export function applySizingProfile(
+  config: RiskConfig,
+  profile: SizingProfile,
+): RiskConfig {
+  const resolved = resolveSizingProfile(profile);
+  return {
+    ...config,
+    sizingProfile: profile,
+    riskPercentPerTrade: resolved.riskPercentPerTrade,
+    minEntryGrade: resolved.minEntryGrade,
+  };
 }
 
 export function calculatePositionSize(
@@ -30,6 +69,8 @@ export function validateOrderRisk(params: {
   openPositions: Position[];
   dayPnl: number;
   peakEquity: number;
+  /** Signal entry grade when placing from a setup. */
+  entryGrade?: "A+" | "STANDARD" | "WAIT";
 }): RiskDecision {
   const { config, request, entry, stop, takeProfit, openPositions, dayPnl, peakEquity } = params;
 
@@ -76,6 +117,34 @@ export function validateOrderRisk(params: {
     }
   }
 
+  const profile = resolveSizingProfile(config.sizingProfile ?? "standard");
+  const minGrade = config.minEntryGrade ?? profile.minEntryGrade;
+  const grade = params.entryGrade;
+  if (grade === "WAIT") {
+    return {
+      allowed: false,
+      reason: "WAIT entry grade — no executable setup.",
+      quantity: 0,
+      riskAmount: 0,
+    };
+  }
+  if (minGrade === "A+" && grade != null && grade !== "A+") {
+    return {
+      allowed: false,
+      reason: "Sizing profile requires A+ entry grade.",
+      quantity: 0,
+      riskAmount: 0,
+    };
+  }
+  if (minGrade === "A+" && grade == null) {
+    return {
+      allowed: false,
+      reason: "Conservative sizing requires A+ entry grade on the signal.",
+      quantity: 0,
+      riskAmount: 0,
+    };
+  }
+
   if (stop == null || stop <= 0) {
     return { allowed: false, reason: "Stop-loss is required.", quantity: 0, riskAmount: 0 };
   }
@@ -102,14 +171,15 @@ export function validateOrderRisk(params: {
     }
   }
 
-  const sized = calculatePositionSize(
-    config.accountEquity,
-    config.riskPercentPerTrade,
-    entry,
-    stop,
-  );
+  const riskPct =
+    config.riskPercentPerTrade > 0
+      ? config.riskPercentPerTrade
+      : profile.riskPercentPerTrade;
 
-  const qty = request.quantity > 0 ? Math.min(request.quantity, sized.quantity || request.quantity) : sized.quantity;
+  const sized = calculatePositionSize(config.accountEquity, riskPct, entry, stop);
+
+  const qty =
+    request.quantity > 0 ? Math.min(request.quantity, sized.quantity || request.quantity) : sized.quantity;
   if (qty <= 0) {
     return { allowed: false, reason: "Calculated quantity is zero.", quantity: 0, riskAmount: sized.riskAmount };
   }

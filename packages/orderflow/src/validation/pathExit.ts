@@ -96,10 +96,10 @@ export function resolvePathExit(args: {
 }
 
 /**
- * Partial TP policy for metrics:
- * - TP1 hit → full close at TP1 (current engine only manages TP1 in lifecycle).
- * - TP2/TP3 are recorded as targets but do not scale-out unless enabled later.
- * Documented so dashboards do not invent scale-out fills.
+ * Partial TP policy for metrics (Phase 12):
+ * - Tick lifecycle scale-out (default): 50% TP1 / 30% TP2 / 20% TP3; stay ACTIVE until remainder 0.
+ * - `fullCloseAtTp1: true` restores legacy 100% close at TP1.
+ * - Bar `resolvePathExit` remains TP1-only (same-bar validation path unchanged).
  */
 export const PARTIAL_TP_POLICY =
-  "Lifecycle and paper ledger close 100% at TP1. TP2/TP3 are informational targets only until a scale-out policy is explicitly enabled.";
+  "Tick lifecycle scale-out default 50/30/20 at TP1/TP2/TP3 (HIT_TP when remainder 0). Set scaleOut.fullCloseAtTp1 for legacy 100% TP1 close. Bar pathExit remains TP1-only.";

@@ -106,6 +106,15 @@ export interface CvdState {
   evidence: EvidenceTag[];
 }
 
+export interface IcebergRefillHint {
+  side: "bid" | "ask" | "none";
+  price: number | null;
+  refillCount: number;
+  /** Heuristic confidence band in [0,1] — not a calibrated probability. */
+  confidence: number;
+  note: string;
+}
+
 export interface DomMetrics {
   symbol: string;
   timestamp: number;
@@ -120,7 +129,24 @@ export interface DomMetrics {
   largeAskLevels: BookLevel[];
   pullStackHint: "bid_stack" | "ask_stack" | "bid_pull" | "ask_pull" | "none";
   spoofingRisk: "elevated" | "low" | "unknown";
+  /** Phase 11 heuristic iceberg/refill (optional). */
+  iceberg?: IcebergRefillHint;
   evidence: EvidenceTag[];
+}
+
+export interface MicrostructureSnapshot {
+  iceberg?: IcebergRefillHint;
+  leaderLagger?: {
+    role: "leader" | "lagger" | "peer" | "unknown";
+    confidence: number;
+    note: string;
+    focusChangePct24h: number | null;
+  };
+  commentary?: {
+    text: string;
+    source: "template";
+    mutatesScores: false;
+  };
 }
 
 export interface VolumeProfileLevel {
@@ -519,6 +545,19 @@ export interface TradingSignal {
   entryGrade: "A+" | "STANDARD" | "WAIT";
   /** Checklist notes when A+ filters pass or demote a setup to WAIT. */
   entryQualityNotes?: string[];
+  /**
+   * Phase 11 template commentary — never mutates confidence/direction.
+   * Separate from rule-engine scores.
+   */
+  commentary?: {
+    text: string;
+    source: "template";
+    mutatesScores: false;
+  };
+  /** Phase 12: count of TP levels already filled under scale-out (0–3). */
+  tpHits?: number;
+  /** Phase 12: remaining position fraction after partial TPs (1 = full). */
+  scaleRemainingFrac?: number;
   /** Phase 2 lifecycle status. */
   lifecycle: SignalLifecycle;
   lifecycleUpdatedAt: number;
@@ -526,6 +565,8 @@ export interface TradingSignal {
   setupOpenedAt: number;
   lifecycleNote?: string;
 }
+
+export type SizingProfile = "conservative" | "standard" | "aggressive";
 
 export interface RiskConfig {
   riskPercentPerTrade: number;
@@ -537,6 +578,10 @@ export interface RiskConfig {
   tradingEnabled: boolean;
   emergencyShutdown: boolean;
   allowedSessionsUtc?: { startHour: number; endHour: number }[];
+  /** Phase 12: maps to risk % and min entry grade. */
+  sizingProfile?: SizingProfile;
+  /** When set, reject orders below this entry grade (WAIT always rejected). */
+  minEntryGrade?: "A+" | "STANDARD";
 }
 
 export interface PlaceOrderRequest {
@@ -641,6 +686,8 @@ export interface MarketSnapshot {
   breakRetest?: BreakRetestState;
   /** Phase D dual scenario hypotheses (not executable orders). */
   scenarios?: ScenarioTreeState;
+  /** Phase 11 microstructure heuristics + template commentary. */
+  microstructure?: MicrostructureSnapshot;
   signal?: TradingSignal;
   recentTrades: TradeTick[];
   health: ConnectionHealth;
@@ -655,4 +702,6 @@ export const DEFAULT_RISK_CONFIG: RiskConfig = {
   accountEquity: 100_000,
   tradingEnabled: true,
   emergencyShutdown: false,
+  sizingProfile: "standard",
+  minEntryGrade: "STANDARD",
 };
