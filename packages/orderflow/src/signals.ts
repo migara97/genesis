@@ -887,11 +887,13 @@ export function generateSignal(
 
   // Safety gates: hard WAIT for LONG/SHORT (readiness, opposing DOM, swing, room).
   if (direction !== "WAIT") {
+    // Assign `direction = demote(...)` in this scope (not inside the helper) so
+    // TypeScript widens after each veto; closure writes are not tracked for narrowing.
     const demote = (id: string, family: SignalFactorFamily, reason: string) => {
       addNeutral({ id, family, source: "derived", reason });
-      direction = "WAIT";
       entryGrade = "WAIT";
       entryQualityNotes.push(reason);
+      return "WAIT" as const;
     };
 
     if (config.requireDataReady) {
@@ -900,7 +902,7 @@ export function generateSignal(
         Number.isFinite(volumeProfile.totalVolume) &&
         volumeProfile.totalVolume >= config.minVpTotalVolume;
       if (!footprint || !vpReady) {
-        demote(
+        direction = demote(
           "data_not_ready",
           "orderflow",
           !footprint
@@ -920,7 +922,7 @@ export function generateSignal(
         lastPrice > 0 &&
         Math.abs(ice.price - lastPrice) / lastPrice <= config.icebergVetoProximityPct;
       if (opposing && near && ice.confidence >= config.icebergVetoMinConfidence) {
-        demote(
+        direction = demote(
           "dom_iceberg_opposing_veto",
           "orderflow",
           `Opposing ${ice.side} iceberg/refill near entry — veto ${direction}.`,
@@ -937,7 +939,7 @@ export function generateSignal(
             Math.abs(s.price - lastPrice) / lastPrice <= config.swingProximityPct,
         );
         if (hit) {
-          demote(
+          direction = demote(
             "entry_at_swing_low",
             "structure",
             `Entry within ${(config.swingProximityPct * 100).toFixed(2)}% of a swing low — no SHORT.`,
@@ -950,7 +952,7 @@ export function generateSignal(
             Math.abs(s.price - lastPrice) / lastPrice <= config.swingProximityPct,
         );
         if (hit) {
-          demote(
+          direction = demote(
             "entry_at_swing_high",
             "structure",
             `Entry within ${(config.swingProximityPct * 100).toFixed(2)}% of a swing high — no LONG.`,
@@ -975,7 +977,7 @@ export function generateSignal(
         minStructuralRR: Math.max(config.minRoomToRunR, config.minStructuralRR),
       });
       if (!rewards) {
-        demote(
+        direction = demote(
           "insufficient_room_to_run",
           "structure",
           `Structural R:R below ${Math.max(config.minRoomToRunR, config.minStructuralRR)}R or missing opposing level — veto ${direction}.`,
