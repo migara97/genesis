@@ -11,6 +11,8 @@ export interface StructureTargetsConfig {
   maxTargets: number;
   /** Drop targets farther than this fraction of entry. */
   maxDistancePct: number;
+  /** Drop targets closer than this fraction of entry (avoids near-entry auto-hits). */
+  minDistancePct: number;
   /** Merge targets closer than max(tickSize, entry * this). */
   dedupePct: number;
 }
@@ -18,6 +20,7 @@ export interface StructureTargetsConfig {
 export const DEFAULT_STRUCTURE_TARGETS_CONFIG: StructureTargetsConfig = {
   maxTargets: 3,
   maxDistancePct: 0.15,
+  minDistancePct: 0.001,
   dedupePct: 0.0005,
 };
 
@@ -51,7 +54,7 @@ export function buildStructureTargets(args: {
   const mm = measuredMoveTarget(args.side, entry, args.breakRetest);
   if (mm) candidates.push(mm);
 
-  const swing = priorSwingTarget(args.side, entry, args.structure);
+  const swing = priorSwingTarget(args.side, entry, args.structure, config.minDistancePct);
   if (swing) candidates.push(swing);
 
   const session = sessionExtremeTarget(args.side, entry, args.structure);
@@ -63,6 +66,7 @@ export function buildStructureTargets(args: {
   const filtered = candidates.filter((t) => {
     if (args.side === "LONG" && !(t.price > entry)) return false;
     if (args.side === "SHORT" && !(t.price < entry)) return false;
+    if (t.distancePct < config.minDistancePct) return false;
     if (t.distancePct > config.maxDistancePct) return false;
     return Number.isFinite(t.price);
   });
@@ -100,13 +104,15 @@ function priorSwingTarget(
   side: "LONG" | "SHORT",
   entry: number,
   structure?: MarketStructureState | null,
+  minDistancePct = 0,
 ): StructureTarget | null {
   const swings = structure?.swings ?? [];
   if (swings.length === 0) return null;
+  const farEnough = (price: number) => Math.abs(price - entry) / entry >= minDistancePct;
 
   if (side === "LONG") {
     const highs = swings
-      .filter((s) => s.kind === "high" && s.price > entry)
+      .filter((s) => s.kind === "high" && s.price > entry && farEnough(s.price))
       .sort((a, b) => a.price - b.price);
     const hit = highs[0];
     if (!hit) return null;
@@ -114,7 +120,7 @@ function priorSwingTarget(
   }
 
   const lows = swings
-    .filter((s) => s.kind === "low" && s.price < entry)
+    .filter((s) => s.kind === "low" && s.price < entry && farEnough(s.price))
     .sort((a, b) => b.price - a.price);
   const hit = lows[0];
   if (!hit) return null;

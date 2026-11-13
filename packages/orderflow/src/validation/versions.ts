@@ -4,7 +4,7 @@ import { DEFAULT_SIGNAL_CONFIG, type SignalEngineConfig } from "../signals.js";
 import { DEFAULT_COST_MODEL, type CostModelConfig } from "./costModel.js";
 
 /** Semver-ish engine label for journal rows. Bump when measurement contract changes. */
-export const SIGNAL_ENGINE_VERSION = "0.14.0-phase12";
+export const SIGNAL_ENGINE_VERSION = "0.16.0-rr-ui";
 
 /** Phase 8 claim floors — below these, accuracy stays undefined. */
 export const PHASE8_GATES = {

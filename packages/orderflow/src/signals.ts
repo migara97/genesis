@@ -85,6 +85,22 @@ export interface SignalEngineConfig {
    * Default false — does not change confirmation gates or A+.
    */
   enableStrategyPlugins?: boolean;
+  /** Require footprint + volume profile before LONG/SHORT. */
+  requireDataReady: boolean;
+  /** Minimum VP totalVolume for data readiness. */
+  minVpTotalVolume: number;
+  /** Veto direction when opposing iceberg/refill is near entry. */
+  icebergVetoEnabled: boolean;
+  icebergVetoMinConfidence: number;
+  icebergVetoProximityPct: number;
+  /** Reject entries within this pct of a recent swing high (LONG) / low (SHORT). */
+  swingProximityPct: number;
+  /** Require nearest opposing S/R at least this many R from entry. */
+  minRoomToRunR: number;
+  /** Buffer beyond protective swing/S/R when placing structure stop. */
+  stopBufferPct: number;
+  /** Minimum reward/risk using TP1 at first opposing structure level. */
+  minStructuralRR: number;
 }
 
 export const DEFAULT_SIGNAL_CONFIG: SignalEngineConfig = {
@@ -118,6 +134,15 @@ export const DEFAULT_SIGNAL_CONFIG: SignalEngineConfig = {
   multiConfirmBonus: 0.15,
   waitConfidenceCap: 0.35,
   enableStrategyPlugins: false,
+  requireDataReady: true,
+  minVpTotalVolume: 1,
+  icebergVetoEnabled: true,
+  icebergVetoMinConfidence: 0.4,
+  icebergVetoProximityPct: 0.0015,
+  swingProximityPct: 0.001,
+  minRoomToRunR: 1.5,
+  stopBufferPct: 0.001,
+  minStructuralRR: 1.5,
 };
 
 /** Legacy multi-confirm gates only (used by tests / opt-out). */
@@ -467,7 +492,7 @@ export function generateSignal(
         source: "derived",
         reason: "Session CVD is positive while structure is bullish.",
       });
-      deltaOk = true;
+      // Soft score only — session CVD sign does not set deltaOk / unlock A+ OF.
     }
     if (cvd.cvd < 0 && structure?.trend === "bearish") {
       addShort({
@@ -477,7 +502,7 @@ export function generateSignal(
         source: "derived",
         reason: "Session CVD is negative while structure is bearish.",
       });
-      deltaOk = true;
+      // Soft score only — session CVD sign does not set deltaOk / unlock A+ OF.
     }
     if (cvd.exhaustion) {
       addNeutral({
@@ -860,6 +885,105 @@ export function generateSignal(
     entryQualityNotes.push("No directional setup after base gates.");
   }
 
+  // Safety gates: hard WAIT for LONG/SHORT (readiness, opposing DOM, swing, room).
+  if (direction !== "WAIT") {
+    const demote = (id: string, family: SignalFactorFamily, reason: string) => {
+      addNeutral({ id, family, source: "derived", reason });
+      direction = "WAIT";
+      entryGrade = "WAIT";
+      entryQualityNotes.push(reason);
+    };
+
+    if (config.requireDataReady) {
+      const vpReady =
+        volumeProfile != null &&
+        Number.isFinite(volumeProfile.totalVolume) &&
+        volumeProfile.totalVolume >= config.minVpTotalVolume;
+      if (!footprint || !vpReady) {
+        demote(
+          "data_not_ready",
+          "orderflow",
+          !footprint
+            ? "Data not ready: no footprint bar yet."
+            : "Data not ready: volume profile missing or empty.",
+        );
+      }
+    }
+
+    if (direction !== "WAIT" && config.icebergVetoEnabled && dom?.iceberg) {
+      const ice = dom.iceberg;
+      const opposing =
+        (direction === "SHORT" && ice.side === "bid") ||
+        (direction === "LONG" && ice.side === "ask");
+      const near =
+        ice.price != null &&
+        lastPrice > 0 &&
+        Math.abs(ice.price - lastPrice) / lastPrice <= config.icebergVetoProximityPct;
+      if (opposing && near && ice.confidence >= config.icebergVetoMinConfidence) {
+        demote(
+          "dom_iceberg_opposing_veto",
+          "orderflow",
+          `Opposing ${ice.side} iceberg/refill near entry — veto ${direction}.`,
+        );
+      }
+    }
+
+    if (direction !== "WAIT" && structure && config.swingProximityPct > 0 && lastPrice > 0) {
+      const swings = structure.swings ?? [];
+      if (direction === "SHORT") {
+        const hit = swings.some(
+          (s) =>
+            s.kind === "low" &&
+            Math.abs(s.price - lastPrice) / lastPrice <= config.swingProximityPct,
+        );
+        if (hit) {
+          demote(
+            "entry_at_swing_low",
+            "structure",
+            `Entry within ${(config.swingProximityPct * 100).toFixed(2)}% of a swing low — no SHORT.`,
+          );
+        }
+      } else if (direction === "LONG") {
+        const hit = swings.some(
+          (s) =>
+            s.kind === "high" &&
+            Math.abs(s.price - lastPrice) / lastPrice <= config.swingProximityPct,
+        );
+        if (hit) {
+          demote(
+            "entry_at_swing_high",
+            "structure",
+            `Entry within ${(config.swingProximityPct * 100).toFixed(2)}% of a swing high — no LONG.`,
+          );
+        }
+      }
+    }
+
+    if (direction !== "WAIT" && config.minRoomToRunR > 0 && lastPrice > 0) {
+      const provisionalStop = resolveProtectiveStop({
+        side: direction,
+        entry: lastPrice,
+        structure,
+        volumeProfile,
+        stopBufferPct: config.stopBufferPct,
+      });
+      const rewards = resolveRewardTargets({
+        side: direction,
+        entry: lastPrice,
+        stop: provisionalStop,
+        structure,
+        minStructuralRR: Math.max(config.minRoomToRunR, config.minStructuralRR),
+      });
+      if (!rewards) {
+        demote(
+          "insufficient_room_to_run",
+          "structure",
+          `Structural R:R below ${Math.max(config.minRoomToRunR, config.minStructuralRR)}R or missing opposing level — veto ${direction}.`,
+        );
+      }
+    }
+  }
+
   // Phase 11 plugins: weight-0 neutrals only — never bump long/short or A+ flags.
   if (config.enableStrategyPlugins) {
     const pack = applyConfirmationPacks(input);
@@ -887,41 +1011,36 @@ export function generateSignal(
   let structureTargets: TradingSignal["structureTargets"];
   const invalidation: string[] = [];
 
-  if (direction === "LONG") {
+  if (direction === "LONG" || direction === "SHORT") {
     entry = lastPrice;
-    stopLoss = volumeProfile?.val
-      ? Math.min(volumeProfile.val, lastPrice) * 0.998
-      : lastPrice * 0.995;
-    const risk = entry - stopLoss;
-    takeProfit = [entry + risk * 2, entry + risk * 3, entry + risk * 4];
-    riskReward = 2;
+    stopLoss = resolveProtectiveStop({
+      side: direction,
+      entry,
+      structure,
+      volumeProfile,
+      stopBufferPct: config.stopBufferPct,
+    });
+    const rewards = resolveRewardTargets({
+      side: direction,
+      entry,
+      stop: stopLoss,
+      structure,
+      minStructuralRR: config.minStructuralRR,
+    })!;
+    takeProfit = rewards.takeProfit;
+    riskReward = rewards.riskReward;
     structureTargets = buildStructureTargets({
-      side: "LONG",
+      side: direction,
       entry,
       breakRetest,
       structure,
       volumeProfile,
     });
-    invalidation.push("Close below stop or bearish CHoCH with negative CVD confirmation.");
-    if (breakRetest?.phase === "invalidated" || breakRetest?.phase === "failed") {
-      invalidation.push(`Break/retest playbook ${breakRetest.phase}: ${breakRetest.reason}`);
-    }
-  } else if (direction === "SHORT") {
-    entry = lastPrice;
-    stopLoss = volumeProfile?.vah
-      ? Math.max(volumeProfile.vah, lastPrice) * 1.002
-      : lastPrice * 1.005;
-    const risk = stopLoss - entry;
-    takeProfit = [entry - risk * 2, entry - risk * 3, entry - risk * 4];
-    riskReward = 2;
-    structureTargets = buildStructureTargets({
-      side: "SHORT",
-      entry,
-      breakRetest,
-      structure,
-      volumeProfile,
-    });
-    invalidation.push("Close above stop or bullish CHoCH with positive CVD confirmation.");
+    invalidation.push(
+      direction === "LONG"
+        ? "Close below stop or bearish CHoCH with negative CVD confirmation."
+        : "Close above stop or bullish CHoCH with positive CVD confirmation.",
+    );
     if (breakRetest?.phase === "invalidated" || breakRetest?.phase === "failed") {
       invalidation.push(`Break/retest playbook ${breakRetest.phase}: ${breakRetest.reason}`);
     }
@@ -1042,9 +1161,9 @@ export function evaluateAPlusEntry(args: {
     }
   }
 
-  if (!(args.deltaOk || args.orderFlowOk)) {
+  if (!args.orderFlowOk) {
     pass = false;
-    notes.push("Need real order-flow trigger (delta and/or footprint/DOM+delta).");
+    notes.push("Need footprint/DOM order-flow trigger (session CVD alone is not enough).");
   } else {
     notes.push("OF trigger OK.");
   }
@@ -1082,6 +1201,82 @@ export function evaluateAPlusEntry(args: {
   }
 
   return { pass, notes };
+}
+
+/** Protective stop: nearest swing/S/R beyond entry + buffer, else VP, else fixed pct. */
+export function resolveProtectiveStop(args: {
+  side: "LONG" | "SHORT";
+  entry: number;
+  structure?: MarketStructureState | null;
+  volumeProfile?: VolumeProfile | null;
+  stopBufferPct: number;
+}): number {
+  const { side, entry, structure, volumeProfile, stopBufferPct } = args;
+  const buffer = Math.max(0, stopBufferPct);
+
+  if (side === "SHORT") {
+    const above: number[] = [
+      ...(structure?.resistance ?? []).filter((p) => p > entry),
+      ...(structure?.swings ?? [])
+        .filter((s) => s.kind === "high" && s.price > entry)
+        .map((s) => s.price),
+    ];
+    if (above.length > 0) {
+      const level = Math.min(...above);
+      return level * (1 + buffer);
+    }
+    if (volumeProfile?.vah != null) {
+      return Math.max(volumeProfile.vah, entry) * 1.002;
+    }
+    return entry * 1.005;
+  }
+
+  const below: number[] = [
+    ...(structure?.support ?? []).filter((p) => p < entry),
+    ...(structure?.swings ?? [])
+      .filter((s) => s.kind === "low" && s.price < entry)
+      .map((s) => s.price),
+  ];
+  if (below.length > 0) {
+    const level = Math.max(...below);
+    return level * (1 - buffer);
+  }
+  if (volumeProfile?.val != null) {
+    return Math.min(volumeProfile.val, entry) * 0.998;
+  }
+  return entry * 0.995;
+}
+
+/** TP1 at first opposing S/R; TP2/TP3 extend by 1R/2R. Null when R:R too low. */
+export function resolveRewardTargets(args: {
+  side: "LONG" | "SHORT";
+  entry: number;
+  stop: number;
+  structure?: MarketStructureState | null;
+  minStructuralRR: number;
+}): { takeProfit: number[]; riskReward: number } | null {
+  const risk = Math.abs(args.entry - args.stop);
+  if (!(risk > 0)) return null;
+
+  let tp1: number | undefined;
+  if (args.side === "SHORT") {
+    const supports = (args.structure?.support ?? []).filter((p) => p < args.entry);
+    tp1 = supports.length ? Math.max(...supports) : undefined;
+  } else {
+    const resistances = (args.structure?.resistance ?? []).filter((p) => p > args.entry);
+    tp1 = resistances.length ? Math.min(...resistances) : undefined;
+  }
+  if (tp1 == null) return null;
+
+  const reward = Math.abs(args.entry - tp1);
+  const rr = reward / risk;
+  if (rr < args.minStructuralRR) return null;
+
+  const takeProfit =
+    args.side === "SHORT"
+      ? [tp1, tp1 - risk, tp1 - risk * 2]
+      : [tp1, tp1 + risk, tp1 + risk * 2];
+  return { takeProfit, riskReward: round2(rr) };
 }
 
 function round2(n: number): number {

@@ -744,7 +744,7 @@ function SignalBoard({
           <div className="signal-dir">{direction}</div>
         </div>
         <div className="confidence">
-          <span className="desk-kicker">Confidence</span>
+          <span className="desk-kicker">Model score</span>
           <strong>{((signal?.confidence ?? 0) * 100).toFixed(0)}%</strong>
           <div className="confidence-track">
             <span style={{ width: `${Math.min(100, (signal?.confidence ?? 0) * 100)}%` }} />
@@ -754,6 +754,12 @@ function SignalBoard({
       <div className="chip-row">
         <span className={`chip ${entryGradeChipClass(signal?.entryGrade)}`} title={(signal?.entryQualityNotes ?? []).join("\n")}>
           Entry {signal?.entryGrade ?? "WAIT"}
+        </span>
+        <span className="chip" title="Independent confirmation families (not raw factor count)">
+          Families:{" "}
+          {(signal?.score?.independentFamilies ?? []).length
+            ? (signal?.score?.independentFamilies ?? []).join(" · ")
+            : "none"}
         </span>
         <span className={`chip ${lifecycleChipClass(signal?.lifecycle)}`}>
           Lifecycle {signal?.lifecycle ?? "WATCHING"}
@@ -936,7 +942,7 @@ function SignalBoard({
       <p className="disclaimer" style={{ marginTop: 4 }}>
         Hypotheses only — rank is not a win rate. Executable path remains the single TradingSignal + break/retest accept.
       </p>
-      <div className="desk-kicker">Confirmations</div>
+      <div className="desk-kicker">Factor IDs</div>
       <ul className="list">
         {(signal?.confirmations ?? []).map((item) => (
           <li key={item}>{item}</li>
@@ -978,7 +984,7 @@ function SignalBoard({
             <th>Pair</th>
             <th>Direction</th>
             <th>Price</th>
-            <th>Strength</th>
+            <th>Model score</th>
           </tr>
         </thead>
         <tbody>
@@ -1535,11 +1541,11 @@ function StructureBoard({
         </div>
         <div className="metric">
           <span>Nearest support</span>
-          <strong className="buy">{fmt(nearest(structure?.support, lastPrice))}</strong>
+          <strong className="buy">{fmt(nearestBelow(structure?.support, lastPrice))}</strong>
         </div>
         <div className="metric">
           <span>Nearest resistance</span>
-          <strong className="sell">{fmt(nearest(structure?.resistance, lastPrice))}</strong>
+          <strong className="sell">{fmt(nearestAbove(structure?.resistance, lastPrice))}</strong>
         </div>
       </div>
       <div className="chip-row">
@@ -1598,10 +1604,20 @@ function StructureBoard({
   );
 }
 
-function nearest(prices: number[] | undefined, last?: number): number | undefined {
+function nearestBelow(prices: number[] | undefined, last?: number): number | undefined {
+  if (!prices?.length) return undefined;
+  if (last == null) return prices[prices.length - 1];
+  const below = prices.filter((p) => p < last);
+  if (!below.length) return undefined;
+  return Math.max(...below);
+}
+
+function nearestAbove(prices: number[] | undefined, last?: number): number | undefined {
   if (!prices?.length) return undefined;
   if (last == null) return prices[0];
-  return [...prices].sort((a, b) => Math.abs(a - last) - Math.abs(b - last))[0];
+  const above = prices.filter((p) => p > last);
+  if (!above.length) return undefined;
+  return Math.min(...above);
 }
 
 function fmtClock(value?: number): string {

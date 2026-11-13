@@ -68,6 +68,28 @@ describe("structureTargets", () => {
     assert.equal(mm!.price, 112);
   });
 
+  it("drops near-entry swings below minDistancePct", () => {
+    const near = buildStructureTargets({
+      side: "SHORT",
+      entry: 68888.05,
+      structure: {
+        symbol: "BTCUSDT",
+        trend: "bearish",
+        swings: [
+          { price: 68888, timestamp: 1, type: "LL", kind: "low" },
+          { price: 68000, timestamp: 2, type: "LL", kind: "low" },
+        ],
+        support: [68000],
+        resistance: [70000],
+        liquidityPools: [],
+        evidence: [],
+      },
+      tickSize: 0.1,
+    });
+    assert.ok(!near.some((t) => Math.abs(t.price - 68888) < 1));
+    assert.ok(near.some((t) => t.kind === "prior_swing" && t.price === 68000));
+  });
+
   it("adds prior swing and session extreme beyond entry", () => {
     const targets = buildStructureTargets({
       side: "LONG",

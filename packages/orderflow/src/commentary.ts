@@ -32,17 +32,24 @@ export function buildCommentary(input: CommentaryInput): CommentaryResult {
 
   const sig = input.signal;
   if (sig) {
+    const scorePct = (sig.confidence * 100).toFixed(0);
     if (sig.direction === "WAIT") {
       parts.push(
-        `Model is WAIT (grade ${sig.entryGrade}). Confidence ${(sig.confidence * 100).toFixed(0)}% is a score, not a win rate.`,
+        `Model is WAIT (grade ${sig.entryGrade}). Model score ${scorePct}% is a score, not a win rate.`,
       );
     } else {
+      const families = sig.score.independentFamilies ?? [];
+      const familyLabel =
+        families.length > 0
+          ? `${families.length} families (${families.join(", ")})`
+          : "0 families";
       parts.push(
-        `${sig.direction} setup (${sig.entryGrade}) with ${sig.confirmations.length} confirmations. Confidence ${(sig.confidence * 100).toFixed(0)}% remains uncalibrated until Phase 8 gates pass.`,
+        `${sig.direction} setup (${sig.entryGrade}) · ${familyLabel}. Model score ${scorePct}% (uncalibrated — not win probability).`,
       );
     }
-    if (sig.reasonsAgainst[0]) {
-      parts.push(`Watch: ${sig.reasonsAgainst[0]}`);
+    const against = (sig.reasonsAgainst ?? []).slice(0, 3);
+    if (against.length > 0) {
+      parts.push(`Watch: ${against.join(" | ")}`);
     }
   } else {
     parts.push("No active signal snapshot — commentary limited to microstructure context.");

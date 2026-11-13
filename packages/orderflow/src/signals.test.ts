@@ -440,4 +440,284 @@ describe("generateSignal", () => {
     assert.ok((signal.entryQualityNotes ?? []).some((n) => /HTF permission OK/i.test(n)));
     assert.ok((signal.entryQualityNotes ?? []).some((n) => /Location OK/i.test(n)));
   });
+
+  it("readiness gate WAITs without footprint/VP even with strong SHORT scores", () => {
+    const input = baseLongInput();
+    input.lastPrice = 68888.05;
+    input.footprint = null;
+    input.volumeProfile = null;
+    input.structure = {
+      ...input.structure!,
+      trend: "bearish",
+      support: [68000],
+      resistance: [70000],
+      swings: [],
+    };
+    input.cvd = {
+      ...input.cvd!,
+      cvd: -500,
+      divergence: "bearish",
+    };
+    const signal = generateSignal(input, std);
+    assert.equal(signal.direction, "WAIT");
+    assert.ok(signal.score.factors.some((f) => f.id === "data_not_ready"));
+  });
+
+  it("vetoes SHORT when bid iceberg/refill is near entry", () => {
+    const input = baseLongInput();
+    input.lastPrice = 110;
+    input.structure = {
+      ...input.structure!,
+      trend: "bearish",
+      support: [90],
+      resistance: [120],
+      swings: [],
+    };
+    input.cvd = {
+      ...input.cvd!,
+      cvd: -500,
+      divergence: "bearish",
+    };
+    input.footprint = {
+      ...input.footprint!,
+      totalDelta: -200,
+      imbalances: [
+        { price: 109, side: "bid", ratio: 4, stacked: true, diagonal: false },
+        { price: 109.5, side: "bid", ratio: 4, stacked: true, diagonal: false },
+        { price: 110, side: "bid", ratio: 4, stacked: true, diagonal: false },
+      ],
+    };
+    input.volumeProfile = {
+      ...input.volumeProfile!,
+      val: 90,
+      vah: 108,
+      poc: 100,
+    };
+    input.dom = {
+      symbol: "BTCUSDT",
+      timestamp: Date.now(),
+      bestBid: 109.9,
+      bestAsk: 110.1,
+      mid: 110,
+      spread: 0.2,
+      imbalance: 0,
+      bidLiquidity: 10,
+      askLiquidity: 10,
+      largeBidLevels: [],
+      largeAskLevels: [],
+      pullStackHint: "none",
+      spoofingRisk: "low",
+      iceberg: {
+        side: "bid",
+        price: 110,
+        refillCount: 26,
+        confidence: 1,
+        note: "Heuristic bid refill ×26 near 110",
+      },
+      evidence: [],
+    };
+    const signal = generateSignal(input, std);
+    assert.equal(signal.direction, "WAIT");
+    assert.ok(signal.score.factors.some((f) => f.id === "dom_iceberg_opposing_veto"));
+  });
+
+  it("session CVD alignment does not set deltaOk; A+ needs orderFlowOk", () => {
+    const alignedOnly = generateSignal(
+      {
+        ...baseLongInput(),
+        footprint: undefined,
+        volumeProfile: {
+          ...baseLongInput().volumeProfile!,
+          totalVolume: 10,
+        },
+        structure: {
+          ...baseLongInput().structure!,
+          trend: "bearish",
+          support: [80],
+          resistance: [120],
+        },
+        cvd: {
+          ...baseLongInput().cvd!,
+          cvd: -900,
+          divergence: "none",
+        },
+      },
+      { ...std, requireDataReady: false },
+    );
+    assert.equal(alignedOnly.deltaOk, false);
+    assert.ok(alignedOnly.score.factors.some((f) => f.id === "cvd_negative"));
+
+    const aPlusNoOf = generateSignal({
+      ...baseLongInput(),
+      footprint: {
+        ...baseLongInput().footprint!,
+        totalDelta: 0,
+        imbalances: [],
+      },
+      cvd: {
+        ...baseLongInput().cvd!,
+        cvd: 500,
+        divergence: "bullish",
+      },
+      mtf: {
+        primaryInterval: "15m",
+        frames: [
+          { interval: "1d", trend: "bullish" },
+          { interval: "4h", trend: "bullish" },
+          { interval: "1h", trend: "bullish" },
+          { interval: "15m", trend: "bullish" },
+        ],
+        higherTfBullish: 3,
+        higherTfBearish: 0,
+        higherTfRange: 0,
+        conflictWithPrimary: false,
+        updatedAt: 1,
+      },
+      zones: {
+        symbol: "BTCUSDT",
+        orderBlocks: [
+          {
+            id: "ob1",
+            direction: "bullish",
+            low: 94.5,
+            high: 95.5,
+            createdAt: 1,
+            invalidated: false,
+            definition: "Bullish OB",
+          },
+        ],
+        fairValueGaps: [],
+        recentSweeps: [],
+        evidence: [],
+        updatedAt: 1,
+      },
+    });
+    assert.equal(aPlusNoOf.orderFlowOk, false);
+    assert.equal(aPlusNoOf.direction, "WAIT");
+    assert.ok(
+      (aPlusNoOf.entryQualityNotes ?? []).some((n) => /order-flow trigger|session CVD/i.test(n)),
+    );
+  });
+
+  it("WAITs SHORT when entry sits on a swing low", () => {
+    const input = baseLongInput();
+    input.lastPrice = 68888.05;
+    input.structure = {
+      ...input.structure!,
+      trend: "bearish",
+      support: [67000],
+      resistance: [71000],
+      swings: [
+        {
+          price: 68888,
+          timestamp: 1,
+          kind: "low",
+          type: "LL",
+        },
+      ],
+    };
+    input.cvd = {
+      ...input.cvd!,
+      cvd: -500,
+      divergence: "bearish",
+    };
+    input.footprint = {
+      ...input.footprint!,
+      totalDelta: -200,
+      imbalances: [
+        { price: 68880, side: "bid", ratio: 4, stacked: true, diagonal: false },
+        { price: 68885, side: "bid", ratio: 4, stacked: true, diagonal: false },
+        { price: 68888, side: "bid", ratio: 4, stacked: true, diagonal: false },
+      ],
+    };
+    input.volumeProfile = {
+      ...input.volumeProfile!,
+      val: 67000,
+      vah: 69000,
+      poc: 68000,
+      totalVolume: 100,
+    };
+    const signal = generateSignal(input, std);
+    assert.equal(signal.direction, "WAIT");
+    assert.ok(signal.score.factors.some((f) => f.id === "entry_at_swing_low"));
+  });
+
+  it("uses structure stop and R:R from opposing support for SHORT", () => {
+    const input = baseLongInput();
+    input.lastPrice = 100;
+    input.structure = {
+      ...input.structure!,
+      trend: "bearish",
+      support: [94],
+      resistance: [101],
+      swings: [{ price: 101, timestamp: 1, kind: "high", type: "LH" }],
+    };
+    input.cvd = {
+      ...input.cvd!,
+      cvd: -500,
+      divergence: "bearish",
+    };
+    input.footprint = {
+      ...input.footprint!,
+      totalDelta: -200,
+      imbalances: [
+        { price: 99, side: "bid", ratio: 4, stacked: true, diagonal: false },
+        { price: 99.5, side: "bid", ratio: 4, stacked: true, diagonal: false },
+        { price: 100, side: "bid", ratio: 4, stacked: true, diagonal: false },
+      ],
+    };
+    input.volumeProfile = {
+      ...input.volumeProfile!,
+      val: 90,
+      vah: 99,
+      poc: 95,
+      totalVolume: 50,
+    };
+    const signal = generateSignal(input, std);
+    assert.equal(signal.direction, "SHORT");
+    // Stop beyond resistance 101 * 1.001
+    assert.ok(signal.stopLoss != null && signal.stopLoss > 101);
+    assert.ok(signal.takeProfit?.[0] === 94);
+    assert.ok(signal.riskReward != null && signal.riskReward !== 2);
+    const risk = signal.stopLoss! - 100;
+    const reward = 100 - 94;
+    assert.ok(Math.abs(signal.riskReward! - reward / risk) < 0.02);
+  });
+
+  it("WAITs SHORT when room to next support is under minRoomToRunR", () => {
+    const input = baseLongInput();
+    input.lastPrice = 100;
+    input.structure = {
+      ...input.structure!,
+      trend: "bearish",
+      // Stop = max(vah, entry)*1.002 = 100.2 → risk 0.2; 1.5R = 0.3. Support 0.1 away.
+      support: [99.9],
+      resistance: [105],
+      swings: [],
+    };
+    input.cvd = {
+      ...input.cvd!,
+      cvd: -500,
+      divergence: "bearish",
+    };
+    input.footprint = {
+      ...input.footprint!,
+      totalDelta: -200,
+      imbalances: [
+        { price: 99, side: "bid", ratio: 4, stacked: true, diagonal: false },
+        { price: 99.5, side: "bid", ratio: 4, stacked: true, diagonal: false },
+        { price: 100, side: "bid", ratio: 4, stacked: true, diagonal: false },
+      ],
+    };
+    input.volumeProfile = {
+      ...input.volumeProfile!,
+      val: 90,
+      vah: 99,
+      poc: 95,
+      totalVolume: 50,
+    };
+    const signal = generateSignal(input, std);
+    assert.equal(signal.direction, "WAIT");
+    assert.ok(signal.score.factors.some((f) => f.id === "insufficient_room_to_run"));
+  });
 });

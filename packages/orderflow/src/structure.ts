@@ -61,12 +61,16 @@ export function analyzeMarketStructure(
   const { lastBos, lastChoch, trend } = detectBosChoch(classified);
   const highs = classified.filter((s) => s.kind === "high").map((s) => s.price);
   const lows = classified.filter((s) => s.kind === "low").map((s) => s.price);
+  const refPrice = candles.length > 0 ? candles[candles.length - 1]!.close : Number.NaN;
 
-  const resistance = uniqueSorted(highs).slice(-5);
-  const support = uniqueSorted(lows).slice(-5);
+  // Price-relative: support below ref, resistance above ref (nearest first).
+  const supportAll = uniqueSorted(lows.filter((p) => Number.isFinite(refPrice) && p < refPrice));
+  const resistanceAll = uniqueSorted(highs.filter((p) => Number.isFinite(refPrice) && p > refPrice));
+  const support = supportAll.slice(-5);
+  const resistance = resistanceAll.slice(0, 5);
 
   const liquidityPools: MarketStructureState["liquidityPools"] = [];
-  for (const p of resistance.slice(-2)) {
+  for (const p of resistance.slice(0, 2)) {
     liquidityPools.push({ side: "BSL", price: p, label: "swing high liquidity" });
   }
   for (const p of support.slice(-2)) {

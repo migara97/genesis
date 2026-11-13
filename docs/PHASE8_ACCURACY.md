@@ -10,12 +10,16 @@ This phase does **not** change `generateSignal` confirmation gates, indicator ma
 
 | Item | Value |
 |------|--------|
-| Engine label | `0.13.0-phase8` (`SIGNAL_ENGINE_VERSION`) |
+| Engine label | `0.16.0-rr-ui` (`SIGNAL_ENGINE_VERSION`) |
 | Config fingerprint | `DEFAULT_CONFIG_VERSION` (SHA of default signal + lifecycle + costs) |
 | Lock | `VALIDATION_LOCK_CONFIG` (defaults **on** when `EXECUTION_MODE=PAPER`) |
 | Override API | `POST /api/validation/signal-config` → **403** while locked |
 
 Primary Validation metrics filter to the active fingerprint only. Older rows remain visible under `performanceByConfigVersion`.
+
+**Gate correctness (`0.15.0-gates`):** readiness (footprint+VP), opposing DOM iceberg veto, A+ OF requires `orderFlowOk` (session CVD no longer sets `deltaOk`), swing-proximity and room-to-run hard WAITs, and price-relative support/resistance. These are safety/correctness gates — not weight retunes. The active fingerprint sample restarts when this version ships.
+
+**UI + structure R:R (`0.16.0-rr-ui`):** model-score labeling (not Strength/win%), commentary cites independent families; protective stops from swing/S/R; TP1/R:R from first opposing structure level; structure targets ignore sub-0.1% near-entry levels. Fingerprint sample restarts again.
 
 ## Sample gates
 
