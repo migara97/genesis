@@ -50,12 +50,32 @@ describe("buildCommentary", () => {
         note: "Heuristic bid refill ×3",
         evidence: [],
       },
+      auctionShadow: {
+        state: "BALANCE",
+        modelMode: "OFF",
+        poc: 100,
+        vah: 102,
+        val: 98,
+        priceVsValue: "inside",
+        nearestLvn: null,
+        nearestLvnDistPct: null,
+        nearLvn: false,
+        aggressionSide: "none",
+        aggressionScore: 0,
+        followThrough: "unknown",
+        failedAuction: "none",
+        notes: [],
+        evidence: [],
+        mutatesScores: false,
+      },
     });
     assert.equal(out.source, "template");
     assert.equal(out.mutatesScores, false);
     assert.ok(/WAIT/i.test(out.text));
     assert.ok(/Model score/i.test(out.text));
     assert.ok(/refill/i.test(out.text));
+    assert.ok(/Auction shadow/i.test(out.text));
+    assert.ok(/no score mutation/i.test(out.text));
     assert.equal(out.evidence[0]?.kind, "heuristic");
   });
 

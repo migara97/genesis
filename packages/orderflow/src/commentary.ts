@@ -1,11 +1,13 @@
-import type { EvidenceTag, TradingSignal } from "@of/shared";
+import type { AuctionShadowSnapshot, EvidenceTag, TradingSignal } from "@of/shared";
 import type { IcebergRefillSignal } from "./icebergRefill.js";
 import type { LeaderLaggerReport } from "./leaderLagger.js";
+import { formatAuctionShadowSummary } from "./auctionModel.js";
 
 export interface CommentaryInput {
   signal?: TradingSignal | null;
   iceberg?: IcebergRefillSignal | null;
   leaderLagger?: LeaderLaggerReport | null;
+  auctionShadow?: AuctionShadowSnapshot | null;
   lastPrice?: number | null;
 }
 
@@ -65,6 +67,10 @@ export function buildCommentary(input: CommentaryInput): CommentaryResult {
     parts.push(
       `Cross-section: focus looks like a ${input.leaderLagger.role} vs peers (conf ${input.leaderLagger.confidence}). Not tick lead-lag.`,
     );
+  }
+
+  if (input.auctionShadow) {
+    parts.push(formatAuctionShadowSummary(input.auctionShadow));
   }
 
   return {

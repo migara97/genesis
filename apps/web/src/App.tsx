@@ -212,6 +212,13 @@ export default function App() {
                   ? `${snap.microstructure.leaderLagger.role} conf ${snap.microstructure.leaderLagger.confidence}`
                   : "-"}
               </span>
+              <span className="muted">Auction shadow</span>
+              <span>
+                {snap?.microstructure?.auctionShadow
+                  ? `${snap.microstructure.auctionShadow.state} · ${snap.microstructure.auctionShadow.modelMode} · aggr ${snap.microstructure.auctionShadow.aggressionSide}`
+                  : "-"}{" "}
+                (R4 observational)
+              </span>
             </div>
             {snap?.microstructure?.commentary?.text ? (
               <p className="disclaimer" style={{ marginBottom: 8 }}>

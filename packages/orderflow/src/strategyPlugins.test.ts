@@ -44,7 +44,39 @@ describe("strategyPlugins", () => {
       timestamp: 1,
       dom: null,
     });
-    assert.equal(out.factors.length, 0);
+    assert.equal(
+      out.factors.filter((f) => f.id.includes("iceberg")).length,
+      0,
+    );
+    clearConfirmationPacks();
+  });
+
+  it("auction shadow pack is weight-0 observational only", () => {
+    clearConfirmationPacks();
+    registerDefaultMicrostructurePack();
+    const out = applyConfirmationPacks({
+      symbol: "BTC",
+      lastPrice: 100,
+      timestamp: 1,
+      volumeProfile: {
+        symbol: "BTC",
+        from: 0,
+        to: 1,
+        tickSize: 0.1,
+        levels: [],
+        poc: 100,
+        vah: 102,
+        val: 98,
+        hvn: [],
+        lvn: [],
+        totalVolume: 10,
+      },
+    });
+    const auction = out.factors.find((f) => f.id.includes("auction_shadow"));
+    assert.ok(auction);
+    assert.equal(auction!.weight, 0);
+    assert.equal(auction!.side, "neutral");
+    assert.ok(out.evidence.some((e) => /never mutates/i.test(e.note)));
     clearConfirmationPacks();
   });
 });

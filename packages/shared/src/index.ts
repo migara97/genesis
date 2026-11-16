@@ -134,6 +134,27 @@ export interface DomMetrics {
   evidence: EvidenceTag[];
 }
 
+/** R4 AMT/VP/OF observational shadow — never used as a confirmation gate. */
+export interface AuctionShadowSnapshot {
+  state: "BALANCE" | "IMBALANCE" | "UNKNOWN";
+  modelMode: "TREND_CONTINUATION" | "MEAN_REVERSION" | "OFF";
+  poc: number | null;
+  vah: number | null;
+  val: number | null;
+  priceVsValue: "inside" | "above_vah" | "below_val" | "unknown";
+  nearestLvn: number | null;
+  nearestLvnDistPct: number | null;
+  nearLvn: boolean;
+  aggressionSide: "buy" | "sell" | "none";
+  aggressionScore: number;
+  followThrough: "supportive" | "absorbing" | "unknown";
+  failedAuction: "none" | "failed_high" | "failed_low";
+  notes: string[];
+  evidence: EvidenceTag[];
+  /** Always false — shadow never mutates signal scores. */
+  mutatesScores: false;
+}
+
 export interface MicrostructureSnapshot {
   iceberg?: IcebergRefillHint;
   leaderLagger?: {
@@ -142,6 +163,8 @@ export interface MicrostructureSnapshot {
     note: string;
     focusChangePct24h: number | null;
   };
+  /** R4 Fabio-style AMT shadow tags (observational only). */
+  auctionShadow?: AuctionShadowSnapshot;
   commentary?: {
     text: string;
     source: "template";
@@ -486,6 +509,17 @@ export interface PaperTradeSnapshot {
     breakRetest?: { phase: string; side?: string; bandId?: string };
     quoteVolume24h?: number;
     rangeContext?: "post_pump_compression" | "clean_range" | "none";
+    /** R4 auction shadow slice frozen at paper open (observational). */
+    auctionShadow?: {
+      state: string;
+      modelMode: string;
+      priceVsValue: string;
+      nearLvn: boolean;
+      aggressionSide: string;
+      aggressionScore: number;
+      followThrough: string;
+      failedAuction: string;
+    };
   };
 }
 

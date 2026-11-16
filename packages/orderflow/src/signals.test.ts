@@ -463,7 +463,7 @@ describe("generateSignal", () => {
     assert.ok(signal.score.factors.some((f) => f.id === "data_not_ready"));
   });
 
-  it("vetoes SHORT when bid iceberg/refill is near entry", () => {
+  it("optionally vetoes SHORT when bid iceberg/refill is near entry", () => {
     const input = baseLongInput();
     input.lastPrice = 110;
     input.structure = {
@@ -516,9 +516,14 @@ describe("generateSignal", () => {
       },
       evidence: [],
     };
-    const signal = generateSignal(input, std);
-    assert.equal(signal.direction, "WAIT");
-    assert.ok(signal.score.factors.some((f) => f.id === "dom_iceberg_opposing_veto"));
+    const warned = generateSignal(input, std);
+    assert.equal(warned.direction, "SHORT");
+    assert.ok(warned.score.factors.some((f) => f.id === "dom_iceberg_refill"));
+    assert.ok(!warned.score.factors.some((f) => f.id === "dom_iceberg_opposing_veto"));
+
+    const vetoed = generateSignal(input, { ...std, icebergVetoEnabled: true });
+    assert.equal(vetoed.direction, "WAIT");
+    assert.ok(vetoed.score.factors.some((f) => f.id === "dom_iceberg_opposing_veto"));
   });
 
   it("session CVD alignment does not set deltaOk; A+ needs orderFlowOk", () => {
@@ -690,7 +695,7 @@ describe("generateSignal", () => {
     input.structure = {
       ...input.structure!,
       trend: "bearish",
-      // Stop = max(vah, entry)*1.002 = 100.2 → risk 0.2; 1.5R = 0.3. Support 0.1 away.
+      // Stop via resistance 105*1.001 → risk ~5.1; support 0.1 away → R:R << 1.5.
       support: [99.9],
       resistance: [105],
       swings: [],
@@ -719,5 +724,14 @@ describe("generateSignal", () => {
     const signal = generateSignal(input, std);
     assert.equal(signal.direction, "WAIT");
     assert.ok(signal.score.factors.some((f) => f.id === "insufficient_room_to_run"));
+  });
+
+  it("R4: default config keeps plugins off so auction shadow cannot alter gates", () => {
+    assert.equal(DEFAULT_SIGNAL_CONFIG.enableStrategyPlugins, false);
+    const signal = generateSignal(baseLongInput());
+    assert.equal(
+      signal.score.factors.some((f) => f.id.includes("auction_shadow")),
+      false,
+    );
   });
 });

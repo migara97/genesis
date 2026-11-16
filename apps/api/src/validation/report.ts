@@ -204,7 +204,7 @@ export function buildValidationReport(
       phase9:
         "GET /api/validation/parity?run=1 runs tape OF replay (footprint/CVD/VP + structure/MTF/zones). DOM absent. /api/backtest remains structure/MTF proxy.",
       phase11:
-        "Iceberg/refill + leader/lagger are heuristics with confidence bands. Strategy plugins are weight-0. Commentary never mutates scores. See GET /api/microstructure.",
+        "Iceberg/refill + leader/lagger + R4 auction shadow are heuristics with confidence bands. Strategy plugins are weight-0. Commentary/auction shadow never mutates scores. See GET /api/microstructure.",
       phase12:
         "Scale-out paper ledger + sizing profiles + favorites alerts + LIVE audit. See docs/PHASE12_PRODUCT.md.",
     },

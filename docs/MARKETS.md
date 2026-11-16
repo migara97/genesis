@@ -38,7 +38,7 @@ Schema: `apps/api/src/schema.sql` (applied automatically on API startup).
 
 ## HTTP
 
-`GET /api/markets?q=&quote=&status=live&sort=volume|price|change&favorites=1&limit=500&offset=0`
+`GET /api/markets?q=&quote=&status=live&sort=volume|price|change&favorites=1&limit=2000&offset=0`
 
 `POST /api/watchlist` body `{ "symbol": "SOL-USDT-SWAP", "favorite": true }`
 

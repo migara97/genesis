@@ -37,6 +37,25 @@ export interface DomMetrics {
   evidence: { kind: string; note: string }[];
 }
 
+export interface AuctionShadowSnapshot {
+  state: "BALANCE" | "IMBALANCE" | "UNKNOWN";
+  modelMode: "TREND_CONTINUATION" | "MEAN_REVERSION" | "OFF";
+  poc: number | null;
+  vah: number | null;
+  val: number | null;
+  priceVsValue: string;
+  nearestLvn: number | null;
+  nearestLvnDistPct: number | null;
+  nearLvn: boolean;
+  aggressionSide: string;
+  aggressionScore: number;
+  followThrough: string;
+  failedAuction: string;
+  notes: string[];
+  evidence: { kind: string; note: string }[];
+  mutatesScores: false;
+}
+
 export interface MicrostructureSnapshot {
   iceberg?: DomMetrics["iceberg"];
   leaderLagger?: {
@@ -45,6 +64,7 @@ export interface MicrostructureSnapshot {
     note: string;
     focusChangePct24h: number | null;
   };
+  auctionShadow?: AuctionShadowSnapshot;
   commentary?: {
     text: string;
     source: "template";

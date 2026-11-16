@@ -10,6 +10,7 @@ Add **heuristic** microstructure analytics and an extensibility surface **withou
 |--------|------|-------|
 | `icebergRefill.ts` | L2 size disappear/reappear at same price | `heuristic` + confidence band |
 | `leaderLagger.ts` | Cross-section 24h % vs volume peers | `heuristic` (not tick lead-lag) |
+| `auctionModel.ts` | R4 AMT/VP/OF shadow (balance/imbalance/mode) | observational; `mutatesScores: false` |
 | `strategyPlugins.ts` | `registerConfirmationPack` → weight-0 neutrals | never bumps LONG/SHORT |
 | `commentary.ts` | Template narrative | `mutatesScores: false` always |
 
@@ -20,19 +21,24 @@ Add **heuristic** microstructure analytics and an extensibility surface **withou
 - Snapshot field `microstructure` + signal `commentary`
 - `GET /api/microstructure?symbol=`
 - DOM panel chips + commentary disclaimer in UI
+- R4: `microstructure.auctionShadow` always computed; also frozen on paper `ofSnapshot.auctionShadow`
+- R4 pack `auction_amt_shadow` registered with default packs but still gated by `enableStrategyPlugins` (default **false**) so Phase 8 fingerprint / LONG-SHORT rates stay unchanged
 
 ## Signal engine rules
 
-- Iceberg → `addNeutral` only (`dom_iceberg_refill`)
+- Iceberg → `addNeutral` warning only by default (`dom_iceberg_refill`); `icebergVetoEnabled` defaults **false**
+- Optional hard veto (`dom_iceberg_opposing_veto`) only when `icebergVetoEnabled: true`
 - Plugins require `enableStrategyPlugins: true` (default **false**)
 - Pack factors forced to `weight: 0` and non-`exchange_reported`
 - Commentary never written into confidence / direction / confirmations
+- Auction shadow never written into confidence / direction / confirmations / A+
 
 ## Non-goals
 
 - Claiming institutional / iceberg identity from the exchange  
 - Multi-symbol live OF for true tick lead-lag  
 - Unlocking Phase 8 weight edits  
+- R5 WAIT vetoes from auction state (requires separate approval)  
 
 ## Related
 

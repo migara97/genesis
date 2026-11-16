@@ -80,7 +80,8 @@ export async function fetchMarkets(params: {
   if (params.status) search.set("status", params.status);
   if (params.sort) search.set("sort", params.sort);
   if (params.favorites) search.set("favorites", "1");
-  search.set("limit", "500");
+  // Full venue catalog (OKX ~540, Binance/Bybit ~900+). API clamps to max.
+  search.set("limit", "2000");
   return json(await fetch(`/api/markets?${search.toString()}`));
 }
 

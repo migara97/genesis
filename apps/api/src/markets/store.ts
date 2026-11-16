@@ -168,9 +168,9 @@ export function listMarkets(query: MarketListQuery): { total: number; items: Mar
   const quote = (query.quote ?? "").trim().toUpperCase();
   const status = (query.status ?? "").trim().toLowerCase();
   const sort = SORTS[query.sort ?? "volume"] ?? SORTS.volume;
-  const requestedLimit = Number(query.limit ?? 300);
+  const requestedLimit = Number(query.limit ?? 2000);
   const requestedOffset = Number(query.offset ?? 0);
-  const limit = Math.min(Math.max(Number.isFinite(requestedLimit) ? requestedLimit : 300, 1), 1000);
+  const limit = Math.min(Math.max(Number.isFinite(requestedLimit) ? requestedLimit : 2000, 1), 2000);
   const offset = Math.max(Number.isFinite(requestedOffset) ? requestedOffset : 0, 0);
   const where = `
     WHERE i.exchange = @exchange

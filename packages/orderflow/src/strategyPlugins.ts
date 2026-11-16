@@ -1,4 +1,5 @@
 import type { EvidenceTag, SignalFactor } from "@of/shared";
+import { computeAuctionShadow } from "./auctionModel.js";
 import type { SignalInput } from "./signals.js";
 
 export interface ConfirmationPackResult {
@@ -64,8 +65,47 @@ export function applyConfirmationPacks(input: SignalInput): ConfirmationPackResu
   return { factors, evidence, reasonsAgainst };
 }
 
+/**
+ * R4 auction AMT shadow pack — weight-0 neutrals only.
+ * Registered with default microstructure packs; still requires
+ * `enableStrategyPlugins: true` to attach to generateSignal factors.
+ * Live hub always attaches the same shadow via microstructure (no gate change).
+ */
+export function registerAuctionShadowPack(): void {
+  registerConfirmationPack("auction_amt_shadow", (input) => {
+    const shadow = computeAuctionShadow({
+      symbol: input.symbol,
+      lastPrice: input.lastPrice,
+      volumeProfile: input.volumeProfile,
+      footprint: input.footprint,
+      cvd: input.cvd,
+      breakRetest: input.breakRetest,
+    });
+    return {
+      factors: [
+        {
+          id: "auction_shadow_state",
+          family: "volume",
+          weight: 0,
+          side: "neutral",
+          source: "heuristic",
+          reason: `Auction shadow ${shadow.state}/${shadow.modelMode} (${shadow.priceVsValue}) — observational only.`,
+        },
+      ],
+      evidence: shadow.evidence,
+      reasonsAgainst:
+        shadow.state === "BALANCE" && shadow.modelMode === "OFF"
+          ? [
+              "Auction shadow: price in balance without failed-auction mode — observational caution for trend continuation (does not veto).",
+            ]
+          : [],
+    };
+  });
+}
+
 /** Built-in example pack: surface iceberg caution if present on DOM extension. */
 export function registerDefaultMicrostructurePack(): void {
+  registerAuctionShadowPack();
   registerConfirmationPack("iceberg_caution", (input) => {
     const iceberg = (input.dom as { iceberg?: { side?: string; confidence?: number; note?: string } } | null)
       ?.iceberg;

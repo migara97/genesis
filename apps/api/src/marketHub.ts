@@ -7,6 +7,7 @@ import {
   buildFootprintBar,
   buildMultiTimeframeContext,
   buildVolumeProfile,
+  computeAuctionShadow,
   computeDomMetrics,
   computeLeaderLagger,
   createCvdState,
@@ -26,6 +27,7 @@ import {
   type LeaderLaggerReport,
 } from "@of/orderflow";
 import type {
+  AuctionShadowSnapshot,
   BreakRetestState,
   Candle,
   ChartOverlayState,
@@ -89,6 +91,7 @@ interface SymbolState {
   signal?: TradingSignal;
   iceberg?: IcebergRefillSignal;
   leaderLagger?: LeaderLaggerReport;
+  auctionShadow?: AuctionShadowSnapshot;
   microstructure?: MicrostructureSnapshot;
   lastPrice: number;
   primaryInterval: DeskPrimaryInterval;
@@ -428,10 +431,19 @@ export class MarketHub extends EventEmitter {
     const state = this.states.get(symbol);
     if (!state) return;
     this.refreshLeaderLagger(symbol);
+    state.auctionShadow = computeAuctionShadow({
+      symbol,
+      lastPrice: state.lastPrice,
+      volumeProfile: state.volumeProfile,
+      footprint: state.footprint,
+      cvd: state.cvd,
+      breakRetest: state.breakRetest,
+    });
     const commentary = buildCommentary({
       signal: state.signal,
       iceberg: state.iceberg,
       leaderLagger: state.leaderLagger,
+      auctionShadow: state.auctionShadow,
       lastPrice: state.lastPrice,
     });
     state.microstructure = {
@@ -452,6 +464,7 @@ export class MarketHub extends EventEmitter {
             focusChangePct24h: state.leaderLagger.focusChangePct24h,
           }
         : undefined,
+      auctionShadow: state.auctionShadow,
       commentary: {
         text: commentary.text,
         source: "template",
@@ -654,6 +667,15 @@ export class MarketHub extends EventEmitter {
       breakRetest: state.breakRetest,
     });
     state.signal = applySignalLifecycle(previous, candidate, state.lastPrice, now);
+    // Refresh R4 auction shadow before paper freeze (observational; no score mutation).
+    state.auctionShadow = computeAuctionShadow({
+      symbol,
+      lastPrice: state.lastPrice,
+      volumeProfile: state.volumeProfile,
+      footprint: state.footprint,
+      cvd: state.cvd,
+      breakRetest: state.breakRetest,
+    });
     try {
       recordSignalLifecycle(previous, state.signal, state.lastPrice, config.exchange);
       const ticker = getTickerStats(config.exchange, symbol);
@@ -686,6 +708,18 @@ export class MarketHub extends EventEmitter {
               }
             : undefined,
           quoteVolume24h: ticker?.volume24h ?? undefined,
+          auctionShadow: state.auctionShadow
+            ? {
+                state: state.auctionShadow.state,
+                modelMode: state.auctionShadow.modelMode,
+                priceVsValue: state.auctionShadow.priceVsValue,
+                nearLvn: state.auctionShadow.nearLvn,
+                aggressionSide: state.auctionShadow.aggressionSide,
+                aggressionScore: state.auctionShadow.aggressionScore,
+                followThrough: state.auctionShadow.followThrough,
+                failedAuction: state.auctionShadow.failedAuction,
+              }
+            : undefined,
         },
       });
       const lifecycleChanged =

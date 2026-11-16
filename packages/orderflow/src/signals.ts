@@ -89,7 +89,7 @@ export interface SignalEngineConfig {
   requireDataReady: boolean;
   /** Minimum VP totalVolume for data readiness. */
   minVpTotalVolume: number;
-  /** Veto direction when opposing iceberg/refill is near entry. */
+  /** When true, opposing iceberg/refill near entry hard-vetoes direction (default false = warning only). */
   icebergVetoEnabled: boolean;
   icebergVetoMinConfidence: number;
   icebergVetoProximityPct: number;
@@ -136,10 +136,12 @@ export const DEFAULT_SIGNAL_CONFIG: SignalEngineConfig = {
   enableStrategyPlugins: false,
   requireDataReady: true,
   minVpTotalVolume: 1,
-  icebergVetoEnabled: true,
+  /** Soft warning only by default — heuristic L2 refill is not a hard gate. */
+  icebergVetoEnabled: false,
   icebergVetoMinConfidence: 0.4,
   icebergVetoProximityPct: 0.0015,
   swingProximityPct: 0.001,
+  /** Live-quality floor — require ≥1.5R to opposing structure. */
   minRoomToRunR: 1.5,
   stopBufferPct: 0.001,
   minStructuralRR: 1.5,
