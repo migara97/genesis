@@ -190,6 +190,51 @@ describe("evaluateSignalNotifications", () => {
     }
   });
 
+  it("does not Telegram SIGNAL_EXPIRED when Entry/SL/TP/R:R are empty", () => {
+    updateNotificationPrefs({ telegramEnabled: true, inAppEnabled: true, tpSlEnabled: true });
+    const setupId = `empty-expire-${Date.now()}`;
+    const fires = evaluateSignalNotifications({
+      previous: base({
+        setupId,
+        lifecycle: "PENDING_CONFIRM",
+        direction: "WAIT",
+        entryGrade: "WAIT",
+        entry: undefined,
+        stopLoss: undefined,
+        takeProfit: undefined,
+        riskReward: undefined,
+      }),
+      next: base({
+        setupId,
+        lifecycle: "TIMEOUT",
+        direction: "WAIT",
+        entryGrade: "WAIT",
+        entry: undefined,
+        stopLoss: undefined,
+        takeProfit: undefined,
+        riskReward: undefined,
+      }),
+      price: 64017.55,
+      exchange: config.exchange,
+    });
+    assert.ok(fires.some((f) => f.eventType === "SIGNAL_EXPIRED" && f.channel === "in_app"));
+    assert.equal(hasOutboxEvent(setupId, "SIGNAL_EXPIRED", "telegram"), false);
+    updateNotificationPrefs({ telegramEnabled: false });
+  });
+
+  it("does Telegram SIGNAL_EXPIRED when entry plan is present", () => {
+    updateNotificationPrefs({ telegramEnabled: true, inAppEnabled: true, tpSlEnabled: true });
+    const setupId = `filled-expire-${Date.now()}`;
+    evaluateSignalNotifications({
+      previous: base({ setupId, lifecycle: "ACTIVE", entryGrade: "A+" }),
+      next: base({ setupId, lifecycle: "TIMEOUT", entryGrade: "A+" }),
+      price: 101,
+      exchange: config.exchange,
+    });
+    assert.equal(hasOutboxEvent(setupId, "SIGNAL_EXPIRED", "telegram"), true);
+    updateNotificationPrefs({ telegramEnabled: false });
+  });
+
   it("skips non-favorite symbols", () => {
     const setupId = `nofav-${Date.now()}`;
     setFavorite(config.exchange, "ETHUSDT", false);

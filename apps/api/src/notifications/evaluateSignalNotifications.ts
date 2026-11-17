@@ -45,6 +45,21 @@ function hasLocation(signal: TradingSignal): boolean {
   return signal.confirmations.some((c) => LOCATION_IDS.includes(c));
 }
 
+/** True when ENTRY DETAILS would show real levels (not all dashes). */
+export function hasEntryPlan(signal: TradingSignal): boolean {
+  const tp1 = signal.takeProfit?.[0];
+  return (
+    signal.entry != null &&
+    Number.isFinite(signal.entry) &&
+    signal.stopLoss != null &&
+    Number.isFinite(signal.stopLoss) &&
+    tp1 != null &&
+    Number.isFinite(tp1) &&
+    signal.riskReward != null &&
+    Number.isFinite(signal.riskReward)
+  );
+}
+
 function directionalLean(signal: TradingSignal): "LONG" | "SHORT" | null {
   const { longScore, shortScore } = signal.score;
   if (longScore >= shortScore + 1 && longScore >= 2) return "LONG";
@@ -227,7 +242,8 @@ export function evaluateSignalNotifications(args: {
       }
     }
 
-    if (prefs.telegramEnabled) {
+    // Never Telegram empty ENTRY DETAILS (Entry/SL/TP/R:R all "-").
+    if (prefs.telegramEnabled && hasEntryPlan(args.next)) {
       enqueueNotification({
         setupId: args.next.setupId,
         symbol,
