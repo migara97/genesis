@@ -250,3 +250,64 @@ export async function rotateSecrets(oldEncryptionKey: string): Promise<{ rotated
     }),
   );
 }
+
+export interface NotificationPrefs {
+  enabled: boolean;
+  buyEnabled: boolean;
+  sellEnabled: boolean;
+  hqOnly: boolean;
+  entryConfirmEnabled: boolean;
+  tpSlEnabled: boolean;
+  approachingEnabled: boolean;
+  telegramEnabled: boolean;
+  inAppEnabled: boolean;
+  cooldownMs: number;
+  updatedAt: number;
+}
+
+export interface NotificationHistoryItem {
+  id: string;
+  setupId: string;
+  symbol: string;
+  eventType: string;
+  channel: string;
+  payload: { title?: string; message?: string };
+  status: string;
+  attempts: number;
+  lastError: string | null;
+  createdAt: number;
+  sentAt: number | null;
+}
+
+export async function fetchNotificationPrefs(): Promise<NotificationPrefs> {
+  return json(await fetch("/api/notifications/prefs"));
+}
+
+export async function updateNotificationPrefs(
+  patch: Partial<NotificationPrefs>,
+): Promise<NotificationPrefs> {
+  return json(
+    await fetch("/api/notifications/prefs", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(patch),
+    }),
+  );
+}
+
+export async function fetchNotificationHistory(limit = 30): Promise<{
+  items: NotificationHistoryItem[];
+  note?: string;
+}> {
+  return json(await fetch(`/api/notifications/history?limit=${limit}`));
+}
+
+export async function testTelegramNotification(): Promise<{ ok: boolean; error?: string }> {
+  return json(
+    await fetch("/api/notifications/test", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    }),
+  );
+}

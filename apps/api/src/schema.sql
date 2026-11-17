@@ -199,6 +199,43 @@ CREATE TABLE IF NOT EXISTS alert_fires (
 
 CREATE INDEX IF NOT EXISTS idx_alert_fires_ts ON alert_fires(fired_at DESC);
 
+-- Signal notification prefs (singleton) + async delivery outbox (Telegram / in-app).
+CREATE TABLE IF NOT EXISTS notification_prefs (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  enabled INTEGER NOT NULL DEFAULT 1,
+  buy_enabled INTEGER NOT NULL DEFAULT 1,
+  sell_enabled INTEGER NOT NULL DEFAULT 1,
+  hq_only INTEGER NOT NULL DEFAULT 1,
+  entry_confirm_enabled INTEGER NOT NULL DEFAULT 1,
+  tp_sl_enabled INTEGER NOT NULL DEFAULT 1,
+  approaching_enabled INTEGER NOT NULL DEFAULT 1,
+  telegram_enabled INTEGER NOT NULL DEFAULT 0,
+  in_app_enabled INTEGER NOT NULL DEFAULT 1,
+  cooldown_ms INTEGER NOT NULL DEFAULT 60000,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS notification_outbox (
+  id TEXT PRIMARY KEY,
+  setup_id TEXT NOT NULL,
+  symbol TEXT NOT NULL,
+  event_type TEXT NOT NULL,
+  channel TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  attempts INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT,
+  created_at INTEGER NOT NULL,
+  sent_at INTEGER,
+  UNIQUE(setup_id, event_type, channel)
+);
+
+CREATE INDEX IF NOT EXISTS idx_notification_outbox_status
+  ON notification_outbox(status, created_at);
+
+CREATE INDEX IF NOT EXISTS idx_notification_outbox_ts
+  ON notification_outbox(created_at DESC);
+
 -- Phase 12: LIVE submit audit (no secrets).
 CREATE TABLE IF NOT EXISTS live_audit (
   id TEXT PRIMARY KEY,

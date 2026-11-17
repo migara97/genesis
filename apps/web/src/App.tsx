@@ -3,6 +3,8 @@ import {
   emergencyShutdown,
   fetchBacktest,
   fetchMode,
+  fetchNotificationHistory,
+  fetchNotificationPrefs,
   fetchOrders,
   fetchPositions,
   fetchRisk,
@@ -16,7 +18,11 @@ import {
   putSecret,
   rotateSecrets,
   setMode,
+  testTelegramNotification,
+  updateNotificationPrefs,
   updateRisk,
+  type NotificationHistoryItem,
+  type NotificationPrefs,
 } from "./api";
 import type {
   BacktestResultView,
@@ -47,7 +53,17 @@ import { ScannerPanel } from "./ScannerPanel";
 import { readStoredPrimaryInterval, useMarketSocket } from "./useMarketSocket";
 
 export default function App() {
-  const { snapshots, health, connected, error, subscribe, setPrimaryInterval } = useMarketSocket();
+  const {
+    snapshots,
+    health,
+    connected,
+    error,
+    alerts,
+    dismissAlert,
+    clearAlerts,
+    subscribe,
+    setPrimaryInterval,
+  } = useMarketSocket();
   const symbols = Object.keys(snapshots);
   const [symbol, setSymbol] = useState("");
   const [primaryInterval, setPrimaryLocal] = useState<"5m" | "15m">(readStoredPrimaryInterval());
@@ -179,6 +195,38 @@ export default function App() {
       </header>
       {showSettings ? (
         <SettingsPanel onClose={() => setShowSettings(false)} />
+      ) : null}
+
+      {alerts.length > 0 ? (
+        <div className="panel" style={{ margin: "8px 12px" }} role="status" aria-live="polite">
+          <div className="of-head" style={{ display: "flex", justifyContent: "space-between" }}>
+            <h3 style={{ margin: 0 }}>Signal alerts</h3>
+            <button type="button" className="chip" onClick={clearAlerts}>
+              Clear
+            </button>
+          </div>
+          <div className="panel-body">
+            <ul className="list">
+              {alerts.slice(0, 8).map((a) => (
+                <li key={a.id} style={{ whiteSpace: "pre-wrap" }}>
+                  <strong>
+                    {a.eventType ?? a.lifecycle ?? "ALERT"} · {a.symbol}
+                  </strong>
+                  <div className="disclaimer" style={{ maxHeight: 120, overflow: "auto" }}>
+                    {a.message.slice(0, 600)}
+                    {a.message.length > 600 ? "…" : ""}
+                  </div>
+                  <button type="button" className="chip" onClick={() => dismissAlert(a.id)}>
+                    Dismiss
+                  </button>
+                </li>
+              ))}
+            </ul>
+            <p className="disclaimer">
+              In-app alerts from Signal Engine lifecycle. Model score ≠ win rate. PAPER only.
+            </p>
+          </div>
+        </div>
       ) : null}
 
       <div className="desk-strip">
@@ -1755,7 +1803,9 @@ function SettingsPanel({ onClose }: { onClose: () => void }) {
   const [secrets, setSecrets] = useState<
     { name: string; masked: string; updatedAt: number; present: boolean }[]
   >([]);
-  const [name, setName] = useState("BINANCE_API_KEY");
+  const [prefs, setPrefs] = useState<NotificationPrefs | null>(null);
+  const [history, setHistory] = useState<NotificationHistoryItem[]>([]);
+  const [name, setName] = useState("TELEGRAM_BOT_TOKEN");
   const [value, setValue] = useState("");
   const [oldKey, setOldKey] = useState("");
   const [msg, setMsg] = useState<string | null>(null);
@@ -1763,9 +1813,16 @@ function SettingsPanel({ onClose }: { onClose: () => void }) {
 
   const refresh = async () => {
     try {
-      const [h, s] = await Promise.all([fetchHealth(), fetchSecrets()]);
+      const [h, s, p, hist] = await Promise.all([
+        fetchHealth(),
+        fetchSecrets(),
+        fetchNotificationPrefs(),
+        fetchNotificationHistory(20),
+      ]);
       setHealth(h);
       setSecrets(s.secrets);
+      setPrefs(p);
+      setHistory(hist.items);
       setErr(null);
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
@@ -1798,6 +1855,26 @@ function SettingsPanel({ onClose }: { onClose: () => void }) {
     }
   };
 
+  const patchPrefs = async (patch: Partial<NotificationPrefs>) => {
+    try {
+      const next = await updateNotificationPrefs(patch);
+      setPrefs(next);
+      setMsg("Notification prefs saved");
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const testTelegram = async () => {
+    try {
+      await testTelegramNotification();
+      setMsg("Test Telegram sent (PAPER)");
+      await refresh();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    }
+  };
+
   const ws = health?.ws as
     | { connected?: boolean; lagMs?: number | null; lastError?: string | null }
     | undefined;
@@ -1809,7 +1886,7 @@ function SettingsPanel({ onClose }: { onClose: () => void }) {
   return (
     <section className="panel" style={{ margin: "8px 12px" }}>
       <div className="of-head" style={{ display: "flex", justifyContent: "space-between" }}>
-        <h3 style={{ margin: 0 }}>Settings — ops & secrets</h3>
+        <h3 style={{ margin: 0 }}>Settings — ops, secrets & alerts</h3>
         <button type="button" className="chip" onClick={onClose}>
           Close
         </button>
@@ -1839,6 +1916,71 @@ function SettingsPanel({ onClose }: { onClose: () => void }) {
         {tls?.detail ? <p className="disclaimer">{tls.detail}</p> : null}
         <p className="disclaimer">Prometheus text: GET /metrics</p>
 
+        <div className="desk-kicker">Signal notifications (PAPER)</div>
+        <p className="disclaimer">
+          High-quality BUY/SELL alerts fire only on existing A+ CONFIRMED setups. Favorite the
+          symbol first. No automatic real-money orders.
+        </p>
+        {prefs ? (
+          <div className="chip-row" style={{ flexWrap: "wrap", gap: 8 }}>
+            {(
+              [
+                ["enabled", "Enable alerts", prefs.enabled],
+                ["buyEnabled", "BUY", prefs.buyEnabled],
+                ["sellEnabled", "SELL", prefs.sellEnabled],
+                ["hqOnly", "A+ only", prefs.hqOnly],
+                ["entryConfirmEnabled", "Entry confirm", prefs.entryConfirmEnabled],
+                ["tpSlEnabled", "TP / SL / exit", prefs.tpSlEnabled],
+                ["approachingEnabled", "Zone approaching", prefs.approachingEnabled],
+                ["telegramEnabled", "Telegram", prefs.telegramEnabled],
+                ["inAppEnabled", "In-app", prefs.inAppEnabled],
+              ] as const
+            ).map(([key, label, on]) => (
+              <label key={key} className="chip" style={{ cursor: "pointer" }}>
+                <input
+                  type="checkbox"
+                  checked={on}
+                  onChange={(e) => void patchPrefs({ [key]: e.target.checked })}
+                />{" "}
+                {label}
+              </label>
+            ))}
+            <label className="chip">
+              Cooldown ms{" "}
+              <input
+                type="number"
+                min={0}
+                step={1000}
+                value={prefs.cooldownMs}
+                style={{ width: 90 }}
+                onChange={(e) =>
+                  void patchPrefs({ cooldownMs: Number(e.target.value) || 0 })
+                }
+                aria-label="Notification cooldown ms"
+              />
+            </label>
+            <button type="button" className="chip" onClick={() => void testTelegram()}>
+              Test Telegram
+            </button>
+          </div>
+        ) : (
+          <p className="disclaimer">Loading prefs…</p>
+        )}
+
+        <div className="desk-kicker" style={{ marginTop: 12 }}>
+          Recent notification history
+        </div>
+        <ul className="list">
+          {history.slice(0, 12).map((h) => (
+            <li key={h.id}>
+              {new Date(h.createdAt).toLocaleTimeString()} · {h.symbol} · {h.eventType} ·{" "}
+              {h.channel} · {h.status}
+              {h.lastError ? ` · err: ${h.lastError}` : ""}
+            </li>
+          ))}
+          {history.length === 0 && <li>No notification deliveries yet</li>}
+        </ul>
+
         <div className="desk-kicker">Encrypted secrets (server-only)</div>
         <ul className="list">
           {secrets.map((s) => (
@@ -1850,6 +1992,8 @@ function SettingsPanel({ onClose }: { onClose: () => void }) {
         </ul>
         <div className="chip-row" style={{ flexWrap: "wrap", gap: 8 }}>
           <select value={name} onChange={(e) => setName(e.target.value)} aria-label="Secret name">
+            <option value="TELEGRAM_BOT_TOKEN">TELEGRAM_BOT_TOKEN</option>
+            <option value="TELEGRAM_CHAT_ID">TELEGRAM_CHAT_ID</option>
             <option value="BINANCE_API_KEY">BINANCE_API_KEY</option>
             <option value="BINANCE_API_SECRET">BINANCE_API_SECRET</option>
             <option value="BYBIT_API_KEY">BYBIT_API_KEY</option>

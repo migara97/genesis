@@ -49,6 +49,7 @@ import type {
 import { config } from "./config.js";
 import { evaluateAlerts } from "./alerts/store.js";
 import { getTickerStats, listMarkets } from "./markets/store.js";
+import { evaluateSignalNotifications } from "./notifications/evaluateSignalNotifications.js";
 import { recordSignalLifecycle } from "./signals/journal.js";
 import { syncPaperTradeFromLifecycle } from "./validation/paperLedger.js";
 import { archiveTradeTick } from "./validation/tapeArchive.js";
@@ -736,6 +737,21 @@ export class MarketHub extends EventEmitter {
           setupId: state.signal.setupId,
         });
         for (const fire of fires) this.emit("alert", fire);
+      }
+      // High-quality signal notifications (A+ / lifecycle transitions) — async Telegram via outbox
+      if (lifecycleChanged || previous == null) {
+        try {
+          const notifyFires = evaluateSignalNotifications({
+            previous,
+            next: state.signal,
+            price: state.lastPrice,
+            exchange: config.exchange,
+            primaryInterval: state.primaryInterval ?? this.primaryInterval,
+          });
+          for (const fire of notifyFires) this.emit("alert", fire);
+        } catch (notifyErr) {
+          this.emit("error", notifyErr);
+        }
       }
     } catch (err) {
       this.emit("error", err);

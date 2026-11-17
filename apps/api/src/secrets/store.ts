@@ -12,7 +12,14 @@ CREATE TABLE IF NOT EXISTS secrets (
 );
 `);
 
-const ALLOWED = new Set(["BINANCE_API_KEY", "BINANCE_API_SECRET", "BYBIT_API_KEY", "BYBIT_API_SECRET"]);
+const ALLOWED = new Set([
+  "BINANCE_API_KEY",
+  "BINANCE_API_SECRET",
+  "BYBIT_API_KEY",
+  "BYBIT_API_SECRET",
+  "TELEGRAM_BOT_TOKEN",
+  "TELEGRAM_CHAT_ID",
+]);
 
 function keyMaterial(): Buffer {
   return createHash("sha256").update(config.encryptionKey).digest();

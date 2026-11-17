@@ -28,6 +28,16 @@ import {
   listAlerts,
 } from "./alerts/store.js";
 import { listLiveAudit } from "./execution/liveAudit.js";
+import {
+  drainNotificationOutbox,
+  startNotificationDispatcher,
+} from "./notifications/dispatcher.js";
+import { listNotificationHistory } from "./notifications/outbox.js";
+import {
+  getNotificationPrefs,
+  updateNotificationPrefs,
+} from "./notifications/prefs.js";
+import { sendTelegramMessage } from "./notifications/telegram.js";
 import { listPaperTrades } from "./validation/paperLedger.js";
 import { runParityReport } from "./validation/parityRunner.js";
 import { buildValidationReport } from "./validation/report.js";
@@ -254,6 +264,52 @@ app.delete("/api/alerts/:id", async (req, reply) => {
   return { ok: true };
 });
 
+app.get("/api/notifications/prefs", async () => getNotificationPrefs());
+
+app.put("/api/notifications/prefs", async (req) => {
+  const body = z
+    .object({
+      enabled: z.boolean().optional(),
+      buyEnabled: z.boolean().optional(),
+      sellEnabled: z.boolean().optional(),
+      hqOnly: z.boolean().optional(),
+      entryConfirmEnabled: z.boolean().optional(),
+      tpSlEnabled: z.boolean().optional(),
+      approachingEnabled: z.boolean().optional(),
+      telegramEnabled: z.boolean().optional(),
+      inAppEnabled: z.boolean().optional(),
+      cooldownMs: z.number().int().min(0).max(3_600_000).optional(),
+    })
+    .parse(req.body ?? {});
+  return updateNotificationPrefs(body);
+});
+
+app.get("/api/notifications/history", async (req) => {
+  const q = req.query as { limit?: string };
+  const limit = q.limit ? Number(q.limit) : 50;
+  return {
+    items: listNotificationHistory(Number.isFinite(limit) ? limit : 50),
+    note: "PAPER signal notifications only — model score is not a win rate.",
+  };
+});
+
+app.post("/api/notifications/test", async (_req, reply) => {
+  const prefs = getNotificationPrefs();
+  if (!prefs.telegramEnabled) {
+    return reply.code(400).send({
+      error: "Enable Telegram in notification prefs first.",
+    });
+  }
+  const result = await sendTelegramMessage(
+    "Genesis PAPER test alert\n\nSignal Engine notifications are configured. No trade was placed.",
+  );
+  if (!result.ok) {
+    return reply.code(502).send({ ok: false, error: result.error });
+  }
+  void drainNotificationOutbox();
+  return { ok: true, channel: "telegram" };
+});
+
 app.get("/api/live-audit", async (req) => {
   const q = req.query as { limit?: string };
   return { entries: listLiveAudit(q.limit ? Number(q.limit) : 100) };
@@ -463,6 +519,8 @@ try {
   marketHub.startFocusRotation(app.log);
   startMarketSync(app.log);
   startAltScanner(app.log);
+  startNotificationDispatcher(2_000);
+  app.log.info("Notification dispatcher started (Telegram outbox)");
 } catch (err) {
   app.log.error(err);
   process.exit(1);

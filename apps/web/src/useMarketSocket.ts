@@ -26,11 +26,22 @@ function wsUrl(): string {
   return `${proto}://${window.location.host}/ws`;
 }
 
+export interface InAppAlert {
+  id: string;
+  symbol: string;
+  message: string;
+  price: number | null;
+  lifecycle: string | null;
+  firedAt: number;
+  eventType?: string;
+}
+
 export function useMarketSocket() {
   const [snapshots, setSnapshots] = useState<Record<string, MarketSnapshot>>({});
   const [health, setHealth] = useState<ConnectionHealth | null>(null);
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [alerts, setAlerts] = useState<InAppAlert[]>([]);
   const retryRef = useRef(0);
   const wsRef = useRef<WebSocket | null>(null);
   const symbolRef = useRef<string | null>(null);
@@ -106,6 +117,28 @@ export function useMarketSocket() {
             setError(null);
           } else if (msg.type === "health") {
             setHealth(msg.payload as ConnectionHealth);
+          } else if (msg.type === "alert") {
+            const fire = msg.payload as {
+              id?: string;
+              symbol?: string;
+              message?: string;
+              price?: number | null;
+              lifecycle?: string | null;
+              firedAt?: number;
+              eventType?: string;
+            };
+            if (fire?.message && fire.symbol) {
+              const item: InAppAlert = {
+                id: fire.id ?? `${Date.now()}`,
+                symbol: fire.symbol,
+                message: fire.message,
+                price: fire.price ?? null,
+                lifecycle: fire.lifecycle ?? null,
+                firedAt: fire.firedAt ?? Date.now(),
+                eventType: fire.eventType,
+              };
+              setAlerts((prev) => [item, ...prev].slice(0, 40));
+            }
           } else if (msg.type === "error") {
             const payload = msg.payload as { error?: string };
             setError(payload.error ?? "Market subscription failed");
@@ -155,11 +188,20 @@ export function useMarketSocket() {
     }
   };
 
+  const dismissAlert = (id: string) => {
+    setAlerts((prev) => prev.filter((a) => a.id !== id));
+  };
+
+  const clearAlerts = () => setAlerts([]);
+
   return {
     snapshots,
     health,
     connected,
     error,
+    alerts,
+    dismissAlert,
+    clearAlerts,
     subscribe,
     setPrimaryInterval,
     primaryInterval: primaryRef.current,
