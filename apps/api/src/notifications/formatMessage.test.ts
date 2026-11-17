@@ -19,7 +19,7 @@ function signal(overrides: Partial<TradingSignal> = {}): TradingSignal {
     reasonsFor: [
       "Market structure trend is bullish (HH/HL bias).",
       "Stacked ask (buy aggression) imbalances on footprint.",
-      "Higher TFs lean bullish (2/3 of 1d/4h/1h).",
+      "Higher TFs lean bullish (2/2 of 4h/1h).",
     ],
     reasonsAgainst: [],
     invalidation: [],

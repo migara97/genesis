@@ -56,13 +56,14 @@ import { archiveTradeTick } from "./validation/tapeArchive.js";
 
 /** Candle limits per TF — keep HTF lighter to limit REST load. */
 const MTF_CANDLE_LIMITS: Record<string, number> = {
-  "1d": 120,
   "4h": 120,
   "1h": 150,
   "15m": 200,
   "5m": 200,
   "1m": 150,
 };
+/** Daily bars are fetched only for previous-session high/low — not HTF voting. */
+const SESSION_DAY_CANDLE_LIMIT = 5;
 /** Re-fetch MTF klines on this interval (not on every trade). */
 const MTF_REFRESH_MS = 5 * 60_000;
 
@@ -588,7 +589,15 @@ export class MarketHub extends EventEmitter {
       const structure = analyzeMarketStructure(symbol, candles, 3);
       frames.push(summarizeTimeframeStructure(interval, structure));
     }
-    const dayCandles = state.candlesByInterval.get("1d") ?? [];
+    let dayCandles = state.candlesByInterval.get("1d") ?? [];
+    if (dayCandles.length === 0) {
+      try {
+        dayCandles = await this.adapter.fetchKlines(symbol, "1d", SESSION_DAY_CANDLE_LIMIT);
+        state.candlesByInterval.set("1d", dayCandles);
+      } catch {
+        dayCandles = [];
+      }
+    }
     const prev = dayCandles.length >= 2 ? dayCandles[dayCandles.length - 2] : dayCandles[0];
     state.structure = analyzeMarketStructure(
       symbol,

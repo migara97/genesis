@@ -44,9 +44,8 @@ export interface ParityRunnerResult {
 
 async function fetchCandleSeries(symbol: string): Promise<{ interval: string; candles: Candle[] }[]> {
   const adapter = createMarketDataAdapter(config.exchange);
-  const intervals = ["1d", "4h", "1h", "15m", "5m", "1m"] as const;
+  const intervals = ["4h", "1h", "15m", "5m", "1m"] as const;
   const limits: Record<string, number> = {
-    "1d": 120,
     "4h": 120,
     "1h": 150,
     "15m": 200,

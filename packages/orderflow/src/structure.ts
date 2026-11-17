@@ -7,9 +7,9 @@ import type {
 } from "@of/shared";
 
 /** Higher timeframes used for HTF confirmation (excludes primary and soft LTF). */
-export const HIGHER_TIMEFRAMES = ["1d", "4h", "1h"] as const;
-/** Full MTF set: HTF + mid + primary + soft LTF. */
-export const MTF_INTERVALS = ["1d", "4h", "1h", "15m", "5m", "1m"] as const;
+export const HIGHER_TIMEFRAMES = ["4h", "1h"] as const;
+/** Full MTF set: HTF + mid + primary + soft LTF. (1d is not used for HTF voting.) */
+export const MTF_INTERVALS = ["4h", "1h", "15m", "5m", "1m"] as const;
 /** Desk default primary (alt 5m workflow). Selectable at runtime via hub. */
 export const PRIMARY_INTERVAL = "5m";
 
@@ -239,7 +239,7 @@ export function buildMultiTimeframeContext(
 }
 
 function intervalRank(interval: string): number {
-  const order = ["1d", "4h", "1h", "15m", "5m", "1m"];
+  const order = ["4h", "1h", "15m", "5m", "1m"];
   const idx = order.indexOf(interval);
   return idx >= 0 ? idx : 99;
 }

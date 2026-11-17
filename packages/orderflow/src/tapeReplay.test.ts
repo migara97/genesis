@@ -58,7 +58,6 @@ describe("tapeReplayOrderFlow", () => {
         { interval: "1m", candles: candles(start - 60 * 60_000, 120, 60_000) },
         { interval: "1h", candles: candles(start - 7 * 24 * 60_000, 40, 60 * 60_000) },
         { interval: "4h", candles: candles(start - 14 * 24 * 60_000, 30, 4 * 60 * 60_000) },
-        { interval: "1d", candles: candles(start - 60 * 24 * 60_000, 40, 24 * 60 * 60_000) },
         { interval: "15m", candles: candles(start - 3 * 24 * 60_000, 80, 15 * 60_000) },
       ],
       { tickSize: 0.1, footprintIntervalMs: 10_000, signalRescoreEveryTrades: 5 },

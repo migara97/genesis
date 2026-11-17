@@ -225,8 +225,8 @@ export interface TimeframeStructureSummary {
 }
 
 /**
- * Multi-timeframe context. Higher TFs (1d/4h/1h) confirm or conflict with
- * the primary (15m) structure bias. Trends are derived from candle swings.
+ * Multi-timeframe context. Higher TFs (4h/1h) confirm or conflict with
+ * the primary (5m/15m) structure bias. Trends are derived from candle swings.
  */
 export interface MultiTimeframeContext {
   primaryInterval: string;

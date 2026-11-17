@@ -63,7 +63,7 @@ export interface SignalEngineConfig {
   levelProximityPct: number;
   /** Phase 3: DOM L2 pressure only scores when trade delta supports the same side. */
   domRequiresTradeDelta: boolean;
-  /** Minimum directional higher-TF frames (1d/4h/1h) needed to score MTF align. */
+  /** Minimum directional higher-TF frames (4h/1h) needed to score MTF align. */
   mtfMinHigherAgree: number;
   /** Max age (ms) for a sweep to count as recent confirmation. */
   sweepMaxAgeMs: number;
@@ -289,7 +289,7 @@ export function generateSignal(
   if (mtf && mtf.frames.length > 0) {
     evidence.push({
       kind: "inferred",
-      note: "Multi-timeframe trends are derived from per-interval candle swings (1d/4h/1h/15m/5m/1m), not exchange-labeled bias.",
+      note: "Multi-timeframe trends are derived from per-interval candle swings (4h/1h/15m/5m/1m), not exchange-labeled bias.",
     });
     const softInterval =
       mtf.primaryInterval === "5m" ? "1m" : mtf.primaryInterval === "15m" ? "5m" : "5m";
@@ -308,7 +308,7 @@ export function generateSignal(
         family: "structure",
         weight: w.mtfHigherAlign,
         source: "derived",
-        reason: `Higher TFs lean bullish (${mtf.higherTfBullish}/${mtf.higherTfBullish + mtf.higherTfBearish + mtf.higherTfRange} of 1d/4h/1h).`,
+        reason: `Higher TFs lean bullish (${mtf.higherTfBullish}/${mtf.higherTfBullish + mtf.higherTfBearish + mtf.higherTfRange} of 4h/1h).`,
       });
       structureOk = true;
     } else if (
@@ -320,7 +320,7 @@ export function generateSignal(
         family: "structure",
         weight: w.mtfHigherAlign,
         source: "derived",
-        reason: `Higher TFs lean bearish (${mtf.higherTfBearish}/${mtf.higherTfBullish + mtf.higherTfBearish + mtf.higherTfRange} of 1d/4h/1h).`,
+        reason: `Higher TFs lean bearish (${mtf.higherTfBearish}/${mtf.higherTfBullish + mtf.higherTfBearish + mtf.higherTfRange} of 4h/1h).`,
       });
       structureOk = true;
     }

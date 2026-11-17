@@ -290,15 +290,14 @@ describe("generateSignal", () => {
         mtf: {
           primaryInterval: "15m",
           frames: [
-            { interval: "1d", trend: "bullish" },
             { interval: "4h", trend: "bullish" },
-            { interval: "1h", trend: "range" },
+            { interval: "1h", trend: "bullish" },
             { interval: "15m", trend: "bullish" },
             { interval: "5m", trend: "bullish" },
           ],
           higherTfBullish: 2,
           higherTfBearish: 0,
-          higherTfRange: 1,
+          higherTfRange: 0,
           conflictWithPrimary: false,
           updatedAt: 1,
         },
@@ -317,14 +316,13 @@ describe("generateSignal", () => {
         mtf: {
           primaryInterval: "15m",
           frames: [
-            { interval: "1d", trend: "bearish" },
             { interval: "4h", trend: "bearish" },
             { interval: "1h", trend: "bearish" },
             { interval: "15m", trend: "bullish" },
             { interval: "5m", trend: "range" },
           ],
           higherTfBullish: 0,
-          higherTfBearish: 3,
+          higherTfBearish: 2,
           higherTfRange: 0,
           conflictWithPrimary: true,
           updatedAt: 1,
@@ -404,13 +402,12 @@ describe("generateSignal", () => {
       mtf: {
         primaryInterval: "15m",
         frames: [
-          { interval: "1d", trend: "bullish" },
           { interval: "4h", trend: "bullish" },
           { interval: "1h", trend: "bullish" },
           { interval: "15m", trend: "bullish" },
           { interval: "5m", trend: "bullish" },
         ],
-        higherTfBullish: 3,
+        higherTfBullish: 2,
         higherTfBearish: 0,
         higherTfRange: 0,
         conflictWithPrimary: false,
@@ -567,12 +564,11 @@ describe("generateSignal", () => {
       mtf: {
         primaryInterval: "15m",
         frames: [
-          { interval: "1d", trend: "bullish" },
           { interval: "4h", trend: "bullish" },
           { interval: "1h", trend: "bullish" },
           { interval: "15m", trend: "bullish" },
         ],
-        higherTfBullish: 3,
+        higherTfBullish: 2,
         higherTfBearish: 0,
         higherTfRange: 0,
         conflictWithPrimary: false,

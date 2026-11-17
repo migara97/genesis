@@ -410,9 +410,8 @@ app.get("/api/backtest/:symbol", async (req) => {
   const symbol = (req.params as { symbol: string }).symbol.toUpperCase();
   const q = req.query as { feeBps?: string; slippageBps?: string };
   const adapter = createMarketDataAdapter(config.exchange);
-  const [primary, d1, h4, h1, soft] = await Promise.all([
+  const [primary, h4, h1, soft] = await Promise.all([
     adapter.fetchKlines(symbol, "5m", 300),
-    adapter.fetchKlines(symbol, "1d", 120),
     adapter.fetchKlines(symbol, "4h", 180),
     adapter.fetchKlines(symbol, "1h", 300),
     adapter.fetchKlines(symbol, "1m", 300),
@@ -424,7 +423,6 @@ app.get("/api/backtest/:symbol", async (req) => {
     symbol,
     primary,
     [
-      { interval: "1d", candles: d1 },
       { interval: "4h", candles: h4 },
       { interval: "1h", candles: h1 },
     ],
