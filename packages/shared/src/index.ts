@@ -79,6 +79,8 @@ export interface FootprintBar {
   exhaustion: boolean;
   unfinishedAuction: boolean;
   evidence: EvidenceTag[];
+  /** True while the current interval is still aggregating (UI-only; signals use closed bars). */
+  forming?: boolean;
 }
 
 export interface FootprintImbalance {
@@ -707,7 +709,10 @@ export interface MarketSnapshot {
   book?: OrderBookSnapshot;
   dom?: DomMetrics;
   cvd?: CvdState;
+  /** Last closed footprint interval (signal engine / playbooks). */
   footprint?: FootprintBar;
+  /** In-progress interval for Footprint panel only — never used by Signal Engine. */
+  liveFootprint?: FootprintBar;
   volumeProfile?: VolumeProfile;
   structure?: MarketStructureState;
   /** Phase 4 multi-timeframe structure summaries. */

@@ -79,9 +79,13 @@ interface SymbolState {
   book?: OrderBookSnapshot;
   dom?: DomMetrics;
   cvd: CvdState;
+  /** Last closed footprint interval — used by signal / playbook logic. */
   footprint?: FootprintBar;
+  /** In-progress interval rebuilt on the publish cadence for real-time UI. */
+  liveFootprint?: FootprintBar;
   footprintBuffer: TradeTick[];
   footprintOpen: number;
+  footprintCloseTimer?: NodeJS.Timeout;
   volumeProfile?: VolumeProfile;
   structure?: MarketStructureState;
   candles: Candle[];
@@ -213,6 +217,34 @@ export class MarketHub extends EventEmitter {
   async focus(symbol: string, primaryInterval?: string | null): Promise<void> {
     const normalized = symbol.trim().toUpperCase();
     if (!normalized) return;
+    const nextPrimary =
+      primaryInterval != null ? resolvePrimaryInterval(primaryInterval) : this.primaryInterval;
+    const keys = [...this.states.keys()];
+    const sameSymbol =
+      keys.length === 1 && keys[0] === normalized && this.states.has(normalized);
+    const samePrimary = this.primaryInterval === nextPrimary;
+
+    // Duplicate WS subscribe / hello must NOT reconnect — that reloads footprint + churns Signal Engine.
+    if (sameSymbol && samePrimary && (this.started || this.connecting)) {
+      this.publish(normalized);
+      return;
+    }
+
+    // Primary TF-only change: refresh candles in place. Keep tape/CVD/footprint/signal memory.
+    if (sameSymbol && !samePrimary && this.started) {
+      this.setPrimaryInterval(primaryInterval);
+      const rotIdx = config.symbols.indexOf(normalized);
+      if (rotIdx >= 0) this.rotationIndex = rotIdx;
+      void this.loadMultiTimeframe(normalized)
+        .then(() => {
+          this.scheduleMtfRefresh(normalized);
+          this.recomputeSignal(normalized);
+          this.publish(normalized);
+        })
+        .catch((err) => this.emit("error", err));
+      return;
+    }
+
     if (primaryInterval != null) this.setPrimaryInterval(primaryInterval);
     const rotIdx = config.symbols.indexOf(normalized);
     if (rotIdx >= 0) this.rotationIndex = rotIdx;
@@ -234,6 +266,7 @@ export class MarketHub extends EventEmitter {
         const stale = this.states.get(key);
         if (stale?.mtfRefreshTimer) clearInterval(stale.mtfRefreshTimer);
         if (stale?.primaryCandleTimer) clearInterval(stale.primaryCandleTimer);
+        if (stale?.footprintCloseTimer) clearTimeout(stale.footprintCloseTimer);
         this.states.delete(key);
       }
     }
@@ -258,33 +291,9 @@ export class MarketHub extends EventEmitter {
     this.connecting = true;
 
     try {
-      for (const symbol of symbols) {
-        if (gen !== this.generation) return;
-        try {
-          await this.loadMultiTimeframe(symbol);
-          const state = this.states.get(symbol)!;
-          state.health = {
-            ...state.health,
-            lastError: undefined,
-          };
-          this.scheduleMtfRefresh(symbol);
-          this.recomputeProfile(symbol);
-          this.recomputeSignal(symbol);
-        } catch (err) {
-          const state = this.states.get(symbol);
-          if (state) {
-            state.health = {
-              ...state.health,
-              connected: false,
-              lastError: (err as Error).message,
-            };
-          }
-          this.emit("error", err);
-          throw err;
-        }
-      }
-
+      // Live trade/book stream first so footprint / tape are not blocked by REST klines.
       if (gen !== this.generation) return;
+      for (const symbol of symbols) this.scheduleFootprintClose(symbol);
       await this.adapter.connect(symbols, {
         onTrade: (t) => this.onTrade(t),
         onBook: (b) => this.onBook(b),
@@ -293,6 +302,38 @@ export class MarketHub extends EventEmitter {
       });
       if (gen !== this.generation) return;
       this.started = true;
+
+      // Hydrate candles in the background; failures must not tear down the live feed.
+      void Promise.all(
+        symbols.map(async (symbol) => {
+          if (gen !== this.generation) return;
+          try {
+            await this.loadMultiTimeframe(symbol);
+            if (gen !== this.generation) return;
+            const state = this.states.get(symbol);
+            if (state) {
+              state.health = {
+                ...state.health,
+                lastError: undefined,
+              };
+            }
+            this.recomputeProfile(symbol);
+            this.recomputeSignal(symbol);
+            this.publish(symbol);
+          } catch (err) {
+            const state = this.states.get(symbol);
+            if (state) {
+              state.health = {
+                ...state.health,
+                lastError: (err as Error).message,
+              };
+            }
+            this.emit("error", err);
+          } finally {
+            if (gen === this.generation) this.scheduleMtfRefresh(symbol);
+          }
+        }),
+      );
     } catch (err) {
       if (gen !== this.generation) return;
       this.emit("error", err);
@@ -304,7 +345,8 @@ export class MarketHub extends EventEmitter {
       }, 5_000);
       return;
     } finally {
-      if (this.started) this.connecting = false;
+      // Always release the connecting gate; `started` covers success, gen mismatch covers focus swaps.
+      this.connecting = false;
     }
   }
 
@@ -319,7 +361,9 @@ export class MarketHub extends EventEmitter {
       book: s.book,
       dom: s.dom,
       cvd: summarizeCvd(s.cvd),
+      // Closed bar only — Signal Engine and playbooks must not see forming intervals.
       footprint: s.footprint,
+      liveFootprint: s.liveFootprint,
       volumeProfile: s.volumeProfile,
       structure: s.structure,
       mtf: s.mtf,
@@ -375,19 +419,7 @@ export class MarketHub extends EventEmitter {
 
     const now = trade.timestamp || Date.now();
     if (now - state.footprintOpen >= config.footprintIntervalMs) {
-      const bar = buildFootprintBar(
-        trade.symbol,
-        state.footprintBuffer,
-        state.footprintOpen,
-        now,
-        { tickSize: this.tickSize(trade.symbol) },
-      );
-      if (bar) state.footprint = bar;
-      state.footprintBuffer = [];
-      state.footprintOpen = now;
-      this.recomputeProfile(trade.symbol);
-      // Refresh structure periodically from candles + last price proxy candle
-      this.refreshStructure(trade.symbol);
+      this.closeFootprintInterval(trade.symbol, now);
     }
 
     this.recomputeSignal(trade.symbol);
@@ -511,10 +543,79 @@ export class MarketHub extends EventEmitter {
       symbol,
       setTimeout(() => {
         this.snapshotTimers.delete(symbol);
+        this.refreshLiveFootprint(symbol);
         const snap = this.getSnapshot(symbol);
         if (snap) this.emit("snapshot", snap);
       }, 200),
     );
+  }
+
+  /** Rebuild the in-progress footprint for UI without mutating closed-bar signal inputs. */
+  private refreshLiveFootprint(symbol: string): void {
+    const state = this.states.get(symbol);
+    if (!state) return;
+    if (state.footprintBuffer.length === 0) {
+      state.liveFootprint = undefined;
+      return;
+    }
+    const now = Date.now();
+    const bar = buildFootprintBar(
+      symbol,
+      state.footprintBuffer,
+      state.footprintOpen,
+      now,
+      { tickSize: this.tickSize(symbol) },
+    );
+    state.liveFootprint = bar ? { ...bar, forming: true } : undefined;
+  }
+
+  /** Ensure intervals close on schedule even when the tape goes quiet. */
+  private scheduleFootprintClose(symbol: string): void {
+    const state = this.states.get(symbol);
+    if (!state) return;
+    if (state.footprintCloseTimer) clearTimeout(state.footprintCloseTimer);
+    const elapsed = Date.now() - state.footprintOpen;
+    const remaining = Math.max(1, config.footprintIntervalMs - elapsed);
+    state.footprintCloseTimer = setTimeout(() => {
+      state.footprintCloseTimer = undefined;
+      // Only touch Signal Engine when a closed bar was actually produced (same as trade-close path).
+      const closed = this.closeFootprintInterval(symbol, Date.now());
+      if (closed) this.recomputeSignal(symbol);
+      this.publish(symbol);
+    }, remaining);
+  }
+
+  /** @returns true when a closed footprint bar was committed for signal consumers. */
+  private closeFootprintInterval(symbol: string, closeTime: number): boolean {
+    const state = this.states.get(symbol);
+    if (!state) return false;
+    if (state.footprintCloseTimer) {
+      clearTimeout(state.footprintCloseTimer);
+      state.footprintCloseTimer = undefined;
+    }
+    let closed = false;
+    if (state.footprintBuffer.length > 0) {
+      const bar = buildFootprintBar(
+        symbol,
+        state.footprintBuffer,
+        state.footprintOpen,
+        closeTime,
+        { tickSize: this.tickSize(symbol) },
+      );
+      if (bar) {
+        state.footprint = { ...bar, forming: false };
+        // Keep showing the closed bar in the Footprint panel until the next interval has trades.
+        state.liveFootprint = undefined;
+        closed = true;
+      }
+      this.recomputeProfile(symbol);
+      // Refresh structure periodically from candles + last price proxy candle
+      this.refreshStructure(symbol);
+    }
+    state.footprintBuffer = [];
+    state.footprintOpen = closeTime;
+    this.scheduleFootprintClose(symbol);
+    return closed;
   }
 
   private tickSize(symbol: string): number {
@@ -594,10 +695,15 @@ export class MarketHub extends EventEmitter {
     if (!state) return;
     const primary = state.primaryInterval ?? this.primaryInterval;
     state.primaryInterval = primary;
+    const loaded = await Promise.all(
+      MTF_INTERVALS.map(async (interval) => {
+        const limit = MTF_CANDLE_LIMITS[interval] ?? 150;
+        const candles = await this.adapter.fetchKlines(symbol, interval, limit);
+        return { interval, candles };
+      }),
+    );
     const frames = [];
-    for (const interval of MTF_INTERVALS) {
-      const limit = MTF_CANDLE_LIMITS[interval] ?? 150;
-      const candles = await this.adapter.fetchKlines(symbol, interval, limit);
+    for (const { interval, candles } of loaded) {
       state.candlesByInterval.set(interval, candles);
       if (interval === primary) {
         state.candles = candles;

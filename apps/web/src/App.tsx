@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   emergencyShutdown,
   fetchBacktest,
@@ -436,9 +436,12 @@ export default function App() {
 
         <div className="stack cell-ofstack">
           <section className="panel of-fill">
-            <h3>Footprint (session bar)</h3>
+            <h3>Footprint (live interval)</h3>
             <div className="panel-body">
-              <FootprintBoard bar={snap?.footprint} sessionCvd={snap?.cvd?.cvd} />
+              <FootprintBoard
+                bar={pickFootprintDisplay(snap?.liveFootprint, snap?.footprint)}
+                sessionCvd={snap?.cvd?.cvd}
+              />
             </div>
           </section>
           <section className="panel of-fill">
@@ -588,13 +591,42 @@ function fmtQty(n?: number): string {
   return n.toFixed(4);
 }
 
+/** Footprint panel only — never used by Signal Engine. Avoid tiny new-interval flashes. */
+function pickFootprintDisplay(live?: FootprintBar, closed?: FootprintBar): FootprintBar | undefined {
+  if (!live) return closed;
+  if (!closed) return live;
+  if (!live.forming) return live;
+  const liveTrades = (live.cells ?? []).reduce((sum, cell) => sum + (cell.trades ?? 0), 0);
+  // Keep last closed table until the new interval has real activity (prevents "reload" wipe).
+  if (liveTrades < 5 && (live.cells?.length ?? 0) < 4) return closed;
+  return live;
+}
+
 function FootprintBoard({ bar, sessionCvd }: { bar?: FootprintBar; sessionCvd?: number }) {
-  if (!bar) return <div className="muted">Aggregating first footprint interval…</div>;
-  const cells = [...bar.cells].sort((a, b) => b.price - a.price);
-  const imbalances = bar.imbalances ?? [];
-  const maxTotal = Math.max(...cells.map((cell) => cell.bidVolume + cell.askVolume), 0);
-  const maxAbsDelta = Math.max(...cells.map((cell) => Math.abs(cell.delta)), 0);
-  const trades = cells.reduce((sum, cell) => sum + (cell.trades ?? 0), 0);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const scrollTopRef = useRef(0);
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (el) el.scrollTop = scrollTopRef.current;
+  }, [bar?.openTime, bar?.closeTime, bar?.totalVolume, bar?.cells?.length]);
+
+  if (!bar) return <div className="muted">Waiting for first trades…</div>;
+  // Cells arrive price-desc from the engine; only re-sort if an older payload is unsorted.
+  const cells =
+    bar.cells.length > 1 && bar.cells[0]!.price < bar.cells[bar.cells.length - 1]!.price
+      ? [...bar.cells].sort((a, b) => b.price - a.price)
+      : bar.cells;
+  const imbalanceByPrice = new Map((bar.imbalances ?? []).map((item) => [item.price, item]));
+  let maxTotal = 0;
+  let maxAbsDelta = 0;
+  let trades = 0;
+  for (const cell of cells) {
+    const total = cell.bidVolume + cell.askVolume;
+    if (total > maxTotal) maxTotal = total;
+    const absDelta = Math.abs(cell.delta);
+    if (absDelta > maxAbsDelta) maxAbsDelta = absDelta;
+    trades += cell.trades ?? 0;
+  }
   return (
     <div className="detail-board">
       <div className="of-head">
@@ -613,6 +645,7 @@ function FootprintBoard({ bar, sessionCvd }: { bar?: FootprintBar; sessionCvd?: 
         </div>
       </div>
       <div className="chip-row">
+        <span className={bar.forming ? "chip hot" : "chip"}>{bar.forming ? "Forming" : "Closed"}</span>
         <span className={bar.absorption ? "chip hot" : "chip"}>Absorption {bar.absorption ? "yes*" : "no"}</span>
         <span className={bar.exhaustion ? "chip hot" : "chip"}>Exhaustion {bar.exhaustion ? "yes*" : "no"}</span>
         <span className={bar.unfinishedAuction ? "chip hot" : "chip"}>
@@ -621,7 +654,13 @@ function FootprintBoard({ bar, sessionCvd }: { bar?: FootprintBar; sessionCvd?: 
         {trades > 0 && <span className="chip">{trades} trades</span>}
       </div>
       </div>
-      <div className="scroll-box">
+      <div
+        className="scroll-box"
+        ref={scrollRef}
+        onScroll={(e) => {
+          scrollTopRef.current = e.currentTarget.scrollTop;
+        }}
+      >
         <table className="table fp-table">
           <thead>
             <tr>
@@ -637,7 +676,7 @@ function FootprintBoard({ bar, sessionCvd }: { bar?: FootprintBar; sessionCvd?: 
             {cells.map((cell) => {
               const total = cell.bidVolume + cell.askVolume;
               const scale = total || 1;
-              const mark = imbalances.find((item) => item.price === cell.price);
+              const mark = imbalanceByPrice.get(cell.price);
               const flags = [
                 mark?.stacked ? "stacked" : "",
                 mark?.diagonal ? "diagonal" : "",
@@ -682,7 +721,7 @@ function FootprintBoard({ bar, sessionCvd }: { bar?: FootprintBar; sessionCvd?: 
         </table>
       <div className="stat-row">
         <div className="stat">
-          <span>Session</span>
+          <span>{bar.forming ? "Interval" : "Closed"}</span>
           <strong>{fmtClock(bar.openTime)} – {fmtClock(bar.closeTime)}</strong>
         </div>
         <div className="stat">

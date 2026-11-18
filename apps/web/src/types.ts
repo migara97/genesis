@@ -103,6 +103,8 @@ export interface FootprintBar {
   exhaustion: boolean;
   unfinishedAuction: boolean;
   evidence: { kind: string; note: string }[];
+  /** True while the current interval is still aggregating. */
+  forming?: boolean;
 }
 
 export interface CvdState {
@@ -488,7 +490,10 @@ export interface MarketSnapshot {
   book?: { bids: BookLevel[]; asks: BookLevel[] };
   dom?: DomMetrics;
   cvd?: CvdState;
+  /** Last closed footprint interval (Signal Engine). */
   footprint?: FootprintBar;
+  /** Forming interval for Footprint panel only. */
+  liveFootprint?: FootprintBar;
   volumeProfile?: VolumeProfile;
   structure?: MarketStructureState;
   mtf?: MultiTimeframeContext;
