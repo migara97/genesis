@@ -66,6 +66,8 @@ const MTF_CANDLE_LIMITS: Record<string, number> = {
 const SESSION_DAY_CANDLE_LIMIT = 5;
 /** Re-fetch MTF klines on this interval (not on every trade). */
 const MTF_REFRESH_MS = 5 * 60_000;
+/** Re-fetch primary TF klines so the desk chart / structure stay near live. */
+const PRIMARY_CANDLE_REFRESH_MS = 30_000;
 
 function createMarketAdapter(): ExchangeMarketDataAdapter {
   return createMarketDataAdapter(config.exchange);
@@ -99,6 +101,7 @@ interface SymbolState {
   primaryInterval: DeskPrimaryInterval;
   health: ConnectionHealth;
   mtfRefreshTimer?: NodeJS.Timeout;
+  primaryCandleTimer?: NodeJS.Timeout;
   leaderLaggerAt?: number;
 }
 
@@ -230,6 +233,7 @@ export class MarketHub extends EventEmitter {
       if (key !== normalized) {
         const stale = this.states.get(key);
         if (stale?.mtfRefreshTimer) clearInterval(stale.mtfRefreshTimer);
+        if (stale?.primaryCandleTimer) clearInterval(stale.primaryCandleTimer);
         this.states.delete(key);
       }
     }
@@ -333,6 +337,19 @@ export class MarketHub extends EventEmitter {
   getMicrostructure(symbol: string): MicrostructureSnapshot | null {
     const s = this.states.get(symbol.toUpperCase());
     return s?.microstructure ?? null;
+  }
+
+  /** Cached klines for the focused symbol (primary or named interval). */
+  getCandles(symbol: string, interval?: string): Candle[] | null {
+    const s = this.states.get(symbol.toUpperCase());
+    if (!s) return null;
+    const key = (interval ?? s.primaryInterval ?? this.primaryInterval).toLowerCase();
+    const fromMap = s.candlesByInterval.get(key);
+    if (fromMap?.length) return fromMap;
+    if (!interval || key === (s.primaryInterval ?? this.primaryInterval).toLowerCase()) {
+      return s.candles.length ? s.candles : null;
+    }
+    return null;
   }
 
   listSnapshots(): MarketSnapshot[] {
@@ -645,6 +662,7 @@ export class MarketHub extends EventEmitter {
     const state = this.states.get(symbol);
     if (!state) return;
     if (state.mtfRefreshTimer) clearInterval(state.mtfRefreshTimer);
+    if (state.primaryCandleTimer) clearInterval(state.primaryCandleTimer);
     state.mtfRefreshTimer = setInterval(() => {
       void this.loadMultiTimeframe(symbol)
         .then(() => {
@@ -653,6 +671,29 @@ export class MarketHub extends EventEmitter {
         })
         .catch((err) => this.emit("error", err));
     }, MTF_REFRESH_MS);
+    state.primaryCandleTimer = setInterval(() => {
+      void this.refreshPrimaryCandles(symbol)
+        .then(() => {
+          this.refreshStructure(symbol);
+          this.recomputeSignal(symbol);
+          this.publish(symbol);
+        })
+        .catch((err) => this.emit("error", err));
+    }, PRIMARY_CANDLE_REFRESH_MS);
+  }
+
+  /** Light REST refresh of the desk primary TF only (keeps OHLCV chart current). */
+  private async refreshPrimaryCandles(symbol: string): Promise<void> {
+    const state = this.states.get(symbol);
+    if (!state) return;
+    const primary = state.primaryInterval ?? this.primaryInterval;
+    const limit = MTF_CANDLE_LIMITS[primary] ?? 200;
+    const candles = await this.adapter.fetchKlines(symbol, primary, limit);
+    state.candlesByInterval.set(primary, candles);
+    state.candles = candles;
+    if (!state.lastPrice && candles.length) {
+      state.lastPrice = candles[candles.length - 1]?.close ?? state.lastPrice;
+    }
   }
 
   private recomputeSignal(symbol: string): void {

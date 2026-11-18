@@ -320,6 +320,11 @@ app.get("/api/markets/:symbol/candles", async (req, reply) => {
   const interval = ((req.query as { interval?: string }).interval ?? "5m").toLowerCase();
   const allowed = new Set(["1m", "3m", "5m", "15m", "1h", "4h", "1d"]);
   if (!allowed.has(interval)) return reply.code(400).send({ error: "Unsupported interval" });
+  const refresh = (req.query as { refresh?: string }).refresh === "1";
+  const cached = !refresh ? marketHub.getCandles(symbol, interval) : null;
+  if (cached?.length) {
+    return { symbol, interval, source: "hub_cache", candles: cached };
+  }
   const adapter = createMarketDataAdapter(config.exchange);
   const candles = await adapter.fetchKlines(symbol, interval, 200);
   replaceCandleCache(config.exchange, symbol, interval, candles);

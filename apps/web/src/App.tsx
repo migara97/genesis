@@ -447,6 +447,7 @@ export default function App() {
               <CvdBoard
                 cvd={snap?.cvd}
                 symbol={symbol}
+                lastPrice={snap?.lastPrice}
                 overlay={snap?.chartOverlay}
                 breakRetest={snap?.breakRetest}
                 structureTargets={snap?.signal?.structureTargets}
@@ -1372,6 +1373,7 @@ function shortTargetKind(kind: string): string {
 function CvdBoard({
   cvd,
   symbol,
+  lastPrice,
   overlay,
   breakRetest,
   structureTargets,
@@ -1380,6 +1382,7 @@ function CvdBoard({
 }: {
   cvd?: CvdState;
   symbol: string;
+  lastPrice?: number;
   overlay?: ChartOverlayState;
   breakRetest?: BreakRetestState;
   structureTargets?: StructureTarget[];
@@ -1455,6 +1458,7 @@ function CvdBoard({
       <CandleChart
         symbol={symbol}
         interval={primaryInterval ?? "5m"}
+        lastPrice={lastPrice}
         overlay={overlay}
         breakRetest={breakRetest}
         structureTargets={structureTargets}

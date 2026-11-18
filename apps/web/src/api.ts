@@ -95,8 +95,14 @@ export async function setFavorite(symbol: string, favorite: boolean) {
   );
 }
 
-export async function fetchCandles(symbol: string, interval = "5m"): Promise<{ candles: Candle[] }> {
-  return json(await fetch(`/api/markets/${encodeURIComponent(symbol)}/candles?interval=${interval}`));
+export async function fetchCandles(
+  symbol: string,
+  interval = "5m",
+  opts?: { refresh?: boolean },
+): Promise<{ candles: Candle[] }> {
+  const q = new URLSearchParams({ interval });
+  if (opts?.refresh) q.set("refresh", "1");
+  return json(await fetch(`/api/markets/${encodeURIComponent(symbol)}/candles?${q}`));
 }
 
 export async function fetchScanner(): Promise<ScannerSnapshot> {

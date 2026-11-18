@@ -21,6 +21,7 @@ const ACTIVE_SCENARIO_STATUSES = new Set(["open", "armed", "triggered"]);
 export function CandleChart({
   symbol,
   interval = "5m",
+  lastPrice,
   overlay,
   breakRetest,
   structureTargets,
@@ -28,6 +29,8 @@ export function CandleChart({
 }: {
   symbol: string;
   interval?: string;
+  /** Live mid/last from the desk socket — keeps the forming bar in sync. */
+  lastPrice?: number;
   overlay?: ChartOverlayState;
   breakRetest?: BreakRetestState;
   structureTargets?: StructureTarget[];
@@ -40,18 +43,25 @@ export function CandleChart({
   useEffect(() => {
     if (!symbol) return;
     let cancel = false;
-    void fetchCandles(symbol, interval)
-      .then((page) => {
-        if (!cancel) {
-          setCandles(page.candles);
-          setError(null);
-        }
-      })
-      .catch((err: unknown) => {
-        if (!cancel) setError(err instanceof Error ? err.message : "Candles unavailable");
-      });
+    const load = (forceExchange = false) => {
+      void fetchCandles(symbol, interval, forceExchange ? { refresh: true } : undefined)
+        .then((page) => {
+          if (!cancel) {
+            setCandles(page.candles);
+            setError(null);
+          }
+        })
+        .catch((err: unknown) => {
+          if (!cancel) setError(err instanceof Error ? err.message : "Candles unavailable");
+        });
+    };
+    load(false);
+    // Keep OHLCV on the same cadence as the live desk — overlays already stream via WS.
+    const refreshMs = Math.min(30_000, Math.max(10_000, Math.floor(intervalToMs(interval) / 10)));
+    const timer = window.setInterval(() => load(true), refreshMs);
     return () => {
       cancel = true;
+      window.clearInterval(timer);
     };
   }, [symbol, interval]);
 
@@ -64,7 +74,7 @@ export function CandleChart({
     const height = canvas.height;
     ctx.clearRect(0, 0, width, height);
 
-    const view = candles.slice(-80);
+    const view = withLivePrice(candles, lastPrice).slice(-80);
     if (view.length < 2) return;
 
     let min = Infinity;
@@ -161,7 +171,7 @@ export function CandleChart({
       ctx.fillRect(x - Math.max(slot * 0.3, 1), height - volHeight, Math.max(slot * 0.6, 2), volHeight);
       ctx.globalAlpha = 1;
     });
-  }, [candles, overlay, breakRetest, structureTargets, scenarios]);
+  }, [candles, lastPrice, overlay, breakRetest, structureTargets, scenarios]);
 
   const bandCount = overlay?.bands?.length ?? 0;
   const phaseLabel = breakRetestPhaseShort(breakRetest?.phase);
@@ -173,7 +183,7 @@ export function CandleChart({
   return (
     <div>
       <div className="muted" style={{ margin: "8px 0 4px" }}>
-        {interval} OHLCV (exchange-reported) · overlays app-derived
+        {interval} OHLCV (live refresh) · overlays app-derived
         {bandCount > 0 ? ` · ${bandCount} zone${bandCount === 1 ? "" : "s"}` : ""}
         {breakRetest && breakRetest.phase !== "idle" ? ` · playbook ${phaseLabel}` : ""}
         {structCount > 0 ? ` · ${structCount} structure TP` : ""}
@@ -418,4 +428,40 @@ function formatPx(n: number): string {
   if (Math.abs(n) >= 1) return n.toFixed(2);
   if (Math.abs(n) >= 0.01) return n.toFixed(4);
   return n.toPrecision(4);
+}
+
+function intervalToMs(interval: string): number {
+  switch (interval) {
+    case "1m":
+      return 60_000;
+    case "3m":
+      return 180_000;
+    case "5m":
+      return 300_000;
+    case "15m":
+      return 900_000;
+    case "1h":
+      return 3_600_000;
+    case "4h":
+      return 14_400_000;
+    case "1d":
+      return 86_400_000;
+    default:
+      return 300_000;
+  }
+}
+
+/** Patch the latest bar's close/high/low so the chart moves with the live desk price. */
+function withLivePrice(candles: Candle[], lastPrice: number | undefined): Candle[] {
+  if (!candles.length || lastPrice == null || !Number.isFinite(lastPrice)) return candles;
+  const out = candles.slice();
+  const last = out[out.length - 1]!;
+  if (last.close === lastPrice && last.high >= lastPrice && last.low <= lastPrice) return candles;
+  out[out.length - 1] = {
+    ...last,
+    close: lastPrice,
+    high: Math.max(last.high, lastPrice),
+    low: Math.min(last.low, lastPrice),
+  };
+  return out;
 }
