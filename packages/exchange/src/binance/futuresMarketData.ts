@@ -17,6 +17,8 @@ const WS_HOSTS = [
 /** Only treat missing trades as a routing failure when depth is clearly alive. */
 const TRADE_WATCHDOG_MS = 12_000;
 const TRADE_WATCHDOG_MIN_DEPTH = 5;
+/** Sockets can stay "open" with zero frames — reconnect so OF panels do not freeze together. */
+const STALE_FEED_MS = 45_000;
 
 interface DepthEvent {
   e: string;
@@ -60,8 +62,10 @@ export class BinanceFuturesMarketDataAdapter implements ExchangeMarketDataAdapte
   private connId = 0;
   private wsHostIndex = 0;
   private lastTradeAt = 0;
+  private lastMessageAt = 0;
   private depthMsgCount = 0;
   private tradeWatchdog: NodeJS.Timeout | null = null;
+  private staleWatchdog: NodeJS.Timeout | null = null;
   private marketOpen = false;
   private publicOpen = false;
   private health: ConnectionHealth = {
@@ -82,7 +86,9 @@ export class BinanceFuturesMarketDataAdapter implements ExchangeMarketDataAdapte
     this.connId += 1;
     this.shouldRun = false;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
     this.clearTradeWatchdog();
+    this.clearStaleWatchdog();
     this.closeSockets();
     this.marketOpen = false;
     this.publicOpen = false;
@@ -165,8 +171,10 @@ export class BinanceFuturesMarketDataAdapter implements ExchangeMarketDataAdapte
     const depthStreams = ids.map((id) => `${id}@depth@100ms`).join("/");
 
     this.lastTradeAt = 0;
+    this.lastMessageAt = 0;
     this.depthMsgCount = 0;
     this.clearTradeWatchdog();
+    this.clearStaleWatchdog();
     this.closeSockets();
     this.marketOpen = false;
     this.publicOpen = false;
@@ -199,6 +207,7 @@ export class BinanceFuturesMarketDataAdapter implements ExchangeMarketDataAdapte
     };
     this.emitHealth();
     this.armTradeWatchdog(connId);
+    this.armStaleWatchdog(connId);
     void this.bootstrapBooks().catch((err) => this.handlers?.onError?.(err as Error));
   }
 
@@ -242,6 +251,7 @@ export class BinanceFuturesMarketDataAdapter implements ExchangeMarketDataAdapte
         if (kind === "market") this.marketOpen = false;
         else this.publicOpen = false;
         this.clearTradeWatchdog();
+        this.clearStaleWatchdog();
         this.health = { ...this.health, connected: false };
         this.emitHealth();
         // Tear peer down so we never run half-connected (trades without depth or vice versa).
@@ -327,6 +337,36 @@ export class BinanceFuturesMarketDataAdapter implements ExchangeMarketDataAdapte
     }
   }
 
+  private armStaleWatchdog(connId: number): void {
+    this.clearStaleWatchdog();
+    this.staleWatchdog = setInterval(() => {
+      if (connId !== this.connId || !this.shouldRun) return;
+      if (!this.lastMessageAt) return;
+      const age = Date.now() - this.lastMessageAt;
+      if (age < STALE_FEED_MS) return;
+      const err = new Error(
+        `Futures WS silent for ${age}ms — reconnecting so Footprint/CVD/VP recover together`,
+      );
+      this.health = { ...this.health, lastError: err.message, connected: false };
+      this.emitHealth();
+      this.handlers?.onError?.(err);
+      this.connId += 1;
+      this.clearTradeWatchdog();
+      this.clearStaleWatchdog();
+      this.closeSockets();
+      this.marketOpen = false;
+      this.publicOpen = false;
+      this.scheduleReconnect(true);
+    }, 5_000);
+  }
+
+  private clearStaleWatchdog(): void {
+    if (this.staleWatchdog) {
+      clearInterval(this.staleWatchdog);
+      this.staleWatchdog = null;
+    }
+  }
+
   private async bootstrapBooks(): Promise<void> {
     for (const symbol of this.symbols) {
       const snap = await this.fetchOrderBookSnapshot(symbol, 1000);
@@ -341,7 +381,8 @@ export class BinanceFuturesMarketDataAdapter implements ExchangeMarketDataAdapte
     try {
       const msg = JSON.parse(raw) as { stream?: string; data?: unknown };
       const data = (msg.data ?? msg) as Record<string, unknown>;
-      this.health = { ...this.health, lastMessageAt: Date.now(), connected: true };
+      this.lastMessageAt = Date.now();
+      this.health = { ...this.health, lastMessageAt: this.lastMessageAt, connected: true };
       if (data.e === "aggTrade") {
         this.handleTrade(data as unknown as AggTradeEvent);
       } else if (data.e === "depthUpdate") {

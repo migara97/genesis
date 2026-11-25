@@ -127,6 +127,12 @@ export class MarketHub extends EventEmitter {
   /** Phase 8: rotate OF focus across DEFAULT_SYMBOLS. */
   private rotationTimer: NodeJS.Timeout | null = null;
   private rotationIndex = 0;
+  /**
+   * Desk pin from a UI subscribe. While set, Phase 8 rotation must not steal
+   * focus — otherwise the UI stays on e.g. XAUUSDT (chart via REST) while the
+   * server streams ETHUSDT and Footprint/CVD/VP stay empty.
+   */
+  private deskPinnedSymbol: string | null = null;
   /** Phase 12: throttle favorites alert evaluation per symbol. */
   private alertEvalAt = new Map<string, number>();
 
@@ -194,9 +200,16 @@ export class MarketHub extends EventEmitter {
       "Phase 8 focus rotation enabled",
     );
     this.rotationTimer = setInterval(() => {
+      if (this.deskPinnedSymbol) {
+        log?.info(
+          { deskPinnedSymbol: this.deskPinnedSymbol },
+          "focus rotation skipped — desk pin active",
+        );
+        return;
+      }
       this.rotationIndex = (this.rotationIndex + 1) % config.symbols.length;
       const next = config.symbols[this.rotationIndex];
-      if (next) void this.focus(next);
+      if (next) void this.focus(next, null, { source: "rotation" });
     }, ms);
   }
 
@@ -214,9 +227,23 @@ export class MarketHub extends EventEmitter {
   /**
    * Stream order-flow for one symbol. Other catalog rows stay on the ticker feed.
    */
-  async focus(symbol: string, primaryInterval?: string | null): Promise<void> {
+  async focus(
+    symbol: string,
+    primaryInterval?: string | null,
+    opts?: { source?: "user" | "rotation" | "boot" },
+  ): Promise<void> {
     const normalized = symbol.trim().toUpperCase();
     if (!normalized) return;
+    const source = opts?.source ?? "user";
+    if (source === "user") this.deskPinnedSymbol = normalized;
+    // boot / rotation must not override an active desk pin
+    if (
+      (source === "rotation" || source === "boot") &&
+      this.deskPinnedSymbol &&
+      this.deskPinnedSymbol !== normalized
+    ) {
+      return;
+    }
     const nextPrimary =
       primaryInterval != null ? resolvePrimaryInterval(primaryInterval) : this.primaryInterval;
     const keys = [...this.states.keys()];

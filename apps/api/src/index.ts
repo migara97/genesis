@@ -496,7 +496,8 @@ app.register(async (instance) => {
             return;
           }
           marketHub.setTickSize(symbol, instrument.tickSize);
-          void marketHub.focus(symbol, msg.primaryInterval);
+          // User desk selection pins focus so Phase 8 rotation cannot steal the tape.
+          void marketHub.focus(symbol, msg.primaryInterval, { source: "user" });
         }
       } catch {
         // ignore malformed client messages
@@ -524,7 +525,7 @@ try {
   app.log.info(
     `Order Flow API listening on ${config.host}:${config.port} mode=${executionService.getMode()} streaming=${initialSymbol} exchange=${config.exchange}`,
   );
-  void marketHub.focus(initialSymbol);
+  void marketHub.focus(initialSymbol, null, { source: "boot" });
   marketHub.startFocusRotation(app.log);
   startMarketSync(app.log);
   startAltScanner(app.log);

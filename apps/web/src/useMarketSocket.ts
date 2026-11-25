@@ -138,9 +138,24 @@ export function useMarketSocket() {
             if (payload.snapshots?.[0]?.health) setHealth(payload.snapshots[0].health);
           } else if (msg.type === "snapshot") {
             const snap = msg.payload as MarketSnapshot;
-            setSnapshots({ [snap.symbol]: snap });
+            // Merge — never drop the desk symbol while focus is switching.
+            setSnapshots((prev) => ({ ...prev, [snap.symbol]: snap }));
             setHealth(snap.health);
             setError(null);
+            // If the server is streaming a different pair than the desk pin, re-assert subscribe.
+            if (
+              symbolRef.current &&
+              snap.symbol !== symbolRef.current &&
+              wsRef.current?.readyState === WebSocket.OPEN
+            ) {
+              wsRef.current.send(
+                JSON.stringify({
+                  type: "subscribe",
+                  symbol: symbolRef.current,
+                  primaryInterval: primaryRef.current,
+                }),
+              );
+            }
           } else if (msg.type === "health") {
             setHealth(msg.payload as ConnectionHealth);
           } else if (msg.type === "pong") {
