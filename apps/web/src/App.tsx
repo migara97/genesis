@@ -89,6 +89,13 @@ export default function App() {
     if (!symbol && snap?.symbol) setSymbol(snap.symbol);
   }, [symbol, snap?.symbol]);
 
+  // Compact ids (UVXYUSDT) canonicalize on OKX to UVXY-USDT-SWAP — follow the hub key.
+  useEffect(() => {
+    if (symbols.length === 1 && symbols[0] && symbol && symbols[0] !== symbol) {
+      setSymbol(symbols[0]);
+    }
+  }, [symbols, symbol]);
+
   const selectSymbol = (next: string) => {
     setPinned(true);
     setSymbol(next);

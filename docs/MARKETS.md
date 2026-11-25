@@ -52,6 +52,8 @@ Client message: `{ "type": "subscribe", "symbol": "ETH-USDT-SWAP" }`
 
 The server disconnects the previous order-flow stream and subscribes to that symbol. Delisted symbols are rejected. Ticker rows for the rest of the catalog keep updating over REST.
 
+Compact ids are normalized per exchange before the stream starts (`UVXYUSDT` → `UVXY-USDT-SWAP` on OKX; Binance/Bybit keep `UVXYUSDT`). That keeps Footprint / CVD / Volume Profile attached to the live tape when `DEFAULT_SYMBOLS` uses the compact form on OKX. Focusing a pair outside `DEFAULT_SYMBOLS` pauses Phase-8 focus rotation so sampling does not steal the desk mid-analysis.
+
 ## Live orders
 
 Live execution still uses the Binance USD-M trading adapter and requires `confirmLiveTrading`. An OKX symbol such as `BTC-USDT-SWAP` is not a Binance order symbol. Use `EXCHANGE=binance` and a Binance symbol such as `BTCUSDT` before placing live orders.

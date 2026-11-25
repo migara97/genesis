@@ -479,18 +479,21 @@ app.register(async (instance) => {
         };
         if (msg.type === "ping") send("pong", {});
         if (msg.type === "subscribe" && msg.symbol) {
-          const symbol = msg.symbol.toUpperCase();
-          if (!/^[A-Z0-9._-]{3,40}$/.test(symbol)) {
+          const requested = msg.symbol.toUpperCase();
+          if (!/^[A-Z0-9._-]{3,40}$/.test(requested)) {
             send("error", { error: "Invalid symbol" });
             return;
           }
-          const instrument = getInstrument(config.exchange, symbol);
+          const symbol = marketHub.canonicalSymbol(requested);
+          const instrument =
+            getInstrument(config.exchange, symbol) ??
+            getInstrument(config.exchange, requested);
           if (instrument?.status === "delisted") {
             send("error", { error: "Symbol is delisted on this exchange" });
             return;
           }
           if (instrument) marketHub.setTickSize(symbol, instrument.tickSize);
-          void marketHub.focus(symbol, msg.primaryInterval);
+          void marketHub.focus(requested, msg.primaryInterval);
         }
       } catch {
         // ignore malformed client messages
@@ -512,7 +515,9 @@ marketHub.on("error", (err: Error) => {
 try {
   // Always bind HTTP/WS first so the UI proxy does not get ECONNREFUSED
   // if the exchange is temporarily unreachable.
-  const initialSymbol = config.symbols[0] ?? "BTC-USDT-SWAP";
+  const initialSymbol = marketHub.canonicalSymbol(
+    config.symbols[0] ?? "BTC-USDT-SWAP",
+  );
   marketHub.bootstrapSymbols([initialSymbol]);
   await app.listen({ port: config.port, host: config.host });
   app.log.info(
