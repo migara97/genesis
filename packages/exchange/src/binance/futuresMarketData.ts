@@ -3,10 +3,16 @@ import type { Candle, ConnectionHealth, OrderBookSnapshot, TradeTick } from "@of
 import type { ExchangeMarketDataAdapter, MarketDataHandlers } from "../types.js";
 
 const REST = "https://fapi.binance.com";
-/** Some networks accept fstream.binance.com but drop @aggTrade while depth still flows. */
+/**
+ * Binance USD-M now routes streams by tier:
+ * - /public  → high-freq book (@depth, @bookTicker)
+ * - /market  → aggTrade, kline, markPrice, …
+ * Unrouted /stream only receives /public data, so TradFi perps (UVXY, TSLA, …)
+ * never get @aggTrade there — Footprint/CVD/VP stay empty while DOM still moves.
+ */
 const WS_HOSTS = [
-  "wss://fstream.binancefuture.com",
   "wss://fstream.binance.com",
+  "wss://fstream.binancefuture.com",
 ] as const;
 const TRADE_WATCHDOG_MS = 8_000;
 
@@ -33,13 +39,16 @@ interface AggTradeEvent {
   m: boolean;
 }
 
+type SocketKind = "market" | "public";
+
 /**
  * Binance USD-M Futures public market data adapter.
  * Aggressor side is exchange-reported via aggTrade.m (buyer is maker => seller aggressor).
  */
 export class BinanceFuturesMarketDataAdapter implements ExchangeMarketDataAdapter {
   readonly id = "binance-futures";
-  private ws: WebSocket | null = null;
+  private marketWs: WebSocket | null = null;
+  private publicWs: WebSocket | null = null;
   private handlers: MarketDataHandlers | null = null;
   private symbols: string[] = [];
   private reconnectAttempts = 0;
@@ -50,6 +59,8 @@ export class BinanceFuturesMarketDataAdapter implements ExchangeMarketDataAdapte
   private wsHostIndex = 0;
   private lastTradeAt = 0;
   private tradeWatchdog: NodeJS.Timeout | null = null;
+  private marketOpen = false;
+  private publicOpen = false;
   private health: ConnectionHealth = {
     exchange: this.id,
     connected: false,
@@ -61,7 +72,7 @@ export class BinanceFuturesMarketDataAdapter implements ExchangeMarketDataAdapte
     this.symbols = symbols.map((s) => s.toUpperCase());
     this.handlers = handlers;
     this.shouldRun = true;
-    await this.openSocket();
+    await this.openSockets();
   }
 
   async disconnect(): Promise<void> {
@@ -69,8 +80,9 @@ export class BinanceFuturesMarketDataAdapter implements ExchangeMarketDataAdapte
     this.shouldRun = false;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.clearTradeWatchdog();
-    this.ws?.close();
-    this.ws = null;
+    this.closeSockets();
+    this.marketOpen = false;
+    this.publicOpen = false;
     this.health = { ...this.health, connected: false };
     this.emitHealth();
   }
@@ -116,21 +128,53 @@ export class BinanceFuturesMarketDataAdapter implements ExchangeMarketDataAdapte
     };
   }
 
-  private async openSocket(): Promise<void> {
+  private async openSockets(): Promise<void> {
     const connId = ++this.connId;
     const host = WS_HOSTS[this.wsHostIndex % WS_HOSTS.length]!;
-    const streams = this.symbols
-      .flatMap((s) => {
-        const id = s.toLowerCase();
-        return [`${id}@aggTrade`, `${id}@depth@100ms`];
-      })
-      .join("/");
-    const url = `${host}/stream?streams=${streams}`;
+    const ids = this.symbols.map((s) => s.toLowerCase());
+    const tradeStreams = ids.map((id) => `${id}@aggTrade`).join("/");
+    const depthStreams = ids.map((id) => `${id}@depth@100ms`).join("/");
+
     this.lastTradeAt = 0;
     this.clearTradeWatchdog();
-    await new Promise<void>((resolve, reject) => {
+    this.closeSockets();
+    this.marketOpen = false;
+    this.publicOpen = false;
+
+    try {
+      await Promise.all([
+        this.openOneSocket(connId, "market", `${host}/market/stream?streams=${tradeStreams}`),
+        this.openOneSocket(connId, "public", `${host}/public/stream?streams=${depthStreams}`),
+      ]);
+    } catch (err) {
+      if (connId === this.connId) {
+        this.closeSockets();
+        this.marketOpen = false;
+        this.publicOpen = false;
+      }
+      throw err;
+    }
+
+    if (connId !== this.connId) return;
+
+    this.health = {
+      ...this.health,
+      connected: this.marketOpen && this.publicOpen,
+      lastError: undefined,
+      reconnectAttempts: this.reconnectAttempts,
+      symbols: this.symbols,
+      lastMessageAt: Date.now(),
+    };
+    this.emitHealth();
+    this.armTradeWatchdog(connId);
+    void this.bootstrapBooks().catch((err) => this.handlers?.onError?.(err as Error));
+  }
+
+  private openOneSocket(connId: number, kind: SocketKind, url: string): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
       const ws = new WebSocket(url);
-      this.ws = ws;
+      if (kind === "market") this.marketWs = ws;
+      else this.publicWs = ws;
       let settled = false;
 
       ws.on("open", () => {
@@ -138,17 +182,8 @@ export class BinanceFuturesMarketDataAdapter implements ExchangeMarketDataAdapte
           ws.close();
           return;
         }
-        this.health = {
-          ...this.health,
-          connected: true,
-          lastError: undefined,
-          reconnectAttempts: this.reconnectAttempts,
-          symbols: this.symbols,
-          lastMessageAt: Date.now(),
-        };
-        this.emitHealth();
-        this.armTradeWatchdog(connId);
-        void this.bootstrapBooks().catch((err) => this.handlers?.onError?.(err as Error));
+        if (kind === "market") this.marketOpen = true;
+        else this.publicOpen = true;
         if (!settled) {
           settled = true;
           resolve();
@@ -161,7 +196,7 @@ export class BinanceFuturesMarketDataAdapter implements ExchangeMarketDataAdapte
 
       ws.on("error", (err) => {
         if (connId !== this.connId) return;
-        this.health = { ...this.health, lastError: err.message };
+        this.health = { ...this.health, lastError: `${kind}: ${err.message}` };
         this.emitHealth();
         this.handlers?.onError?.(err);
         if (!settled) {
@@ -172,22 +207,36 @@ export class BinanceFuturesMarketDataAdapter implements ExchangeMarketDataAdapte
 
       ws.on("close", () => {
         if (connId !== this.connId) return;
+        if (kind === "market") this.marketOpen = false;
+        else this.publicOpen = false;
         this.clearTradeWatchdog();
         this.health = { ...this.health, connected: false };
         this.emitHealth();
+        // Tear peer down so we never run half-connected (trades without depth or vice versa).
+        this.connId += 1;
+        this.closeSockets();
         if (this.shouldRun) this.scheduleReconnect();
       });
     });
   }
 
+  private closeSockets(): void {
+    this.marketWs?.close();
+    this.publicWs?.close();
+    this.marketWs = null;
+    this.publicWs = null;
+  }
+
   private scheduleReconnect(rotateHost = false): void {
+    if (this.reconnectTimer) return;
     this.reconnectAttempts += 1;
     if (rotateHost) this.wsHostIndex = (this.wsHostIndex + 1) % WS_HOSTS.length;
     const delay = Math.min(30_000, 1000 * 2 ** Math.min(this.reconnectAttempts, 5));
     this.health = { ...this.health, reconnectAttempts: this.reconnectAttempts };
     this.emitHealth();
     this.reconnectTimer = setTimeout(() => {
-      void this.openSocket().catch((err) => this.handlers?.onError?.(err as Error));
+      this.reconnectTimer = null;
+      void this.openSockets().catch((err) => this.handlers?.onError?.(err as Error));
     }, delay);
   }
 
@@ -198,7 +247,7 @@ export class BinanceFuturesMarketDataAdapter implements ExchangeMarketDataAdapte
       if (this.lastTradeAt > 0) return;
       const host = WS_HOSTS[this.wsHostIndex % WS_HOSTS.length];
       const err = new Error(
-        `No aggTrade messages from ${host} within ${TRADE_WATCHDOG_MS}ms; rotating Futures WS host`,
+        `No aggTrade messages from ${host}/market within ${TRADE_WATCHDOG_MS}ms; rotating Futures WS host`,
       );
       this.health = { ...this.health, lastError: err.message };
       this.emitHealth();
@@ -206,8 +255,9 @@ export class BinanceFuturesMarketDataAdapter implements ExchangeMarketDataAdapte
       this.wsHostIndex = (this.wsHostIndex + 1) % WS_HOSTS.length;
       this.connId += 1;
       this.clearTradeWatchdog();
-      this.ws?.close();
-      this.ws = null;
+      this.closeSockets();
+      this.marketOpen = false;
+      this.publicOpen = false;
       this.scheduleReconnect(false);
     }, TRADE_WATCHDOG_MS);
   }
