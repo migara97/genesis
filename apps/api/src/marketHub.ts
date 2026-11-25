@@ -1,5 +1,10 @@
 import { EventEmitter } from "node:events";
-import { createMarketDataAdapter, type ExchangeMarketDataAdapter } from "@of/exchange";
+import {
+  createMarketDataAdapter,
+  exchangeSymbolAliases,
+  normalizeExchangeSymbol,
+  type ExchangeMarketDataAdapter,
+} from "@of/exchange";
 import {
   applyTradeToCvd,
   analyzeMarketStructure,
@@ -120,6 +125,11 @@ export class MarketHub extends EventEmitter {
   private generation = 0;
   private retryTimer: NodeJS.Timeout | null = null;
   private tickSizes = new Map<string, number>();
+  /**
+   * Map exchange-native feed ids (e.g. UVXY-USDT-SWAP) onto hub state keys.
+   * Compact DEFAULT_SYMBOLS like UVXYUSDT used to drop OKX trades silently.
+   */
+  private feedToHub = new Map<string, string>();
   /** Desk primary TF for the focused stream (default 5m). */
   private primaryInterval: DeskPrimaryInterval = resolvePrimaryInterval(PRIMARY_INTERVAL);
   /** Coalesce high-frequency trade/book updates so each symbol publishes at most ~5 Hz. */
@@ -127,6 +137,11 @@ export class MarketHub extends EventEmitter {
   /** Phase 8: rotate OF focus across DEFAULT_SYMBOLS. */
   private rotationTimer: NodeJS.Timeout | null = null;
   private rotationIndex = 0;
+  /**
+   * When the desk focuses a pair outside DEFAULT_SYMBOLS (e.g. UVXY), pause rotation
+   * so Phase-8 sampling does not yank the tape mid-analysis.
+   */
+  private holdFocus = false;
   /** Phase 12: throttle favorites alert evaluation per symbol. */
   private alertEvalAt = new Map<string, number>();
 
@@ -145,7 +160,9 @@ export class MarketHub extends EventEmitter {
   /** Prepare empty symbol slots so the API can serve before exchange is up. */
   bootstrapSymbols(symbols = config.symbols): void {
     const sessionStart = Date.now();
-    for (const symbol of symbols) {
+    for (const raw of symbols) {
+      const symbol = this.canonicalSymbol(raw);
+      this.registerFeedAliases(symbol);
       if (this.states.has(symbol)) continue;
       this.states.set(symbol, {
         trades: [],
@@ -161,11 +178,33 @@ export class MarketHub extends EventEmitter {
           exchange: this.adapter.id,
           connected: false,
           reconnectAttempts: 0,
-          symbols,
+          symbols: symbols.map((s) => this.canonicalSymbol(s)),
           lastError: "Connecting to exchange…",
         },
       });
     }
+  }
+
+  /** Exchange-native id used for hub state + snapshots. */
+  canonicalSymbol(symbol: string): string {
+    return normalizeExchangeSymbol(config.exchange, symbol.trim().toUpperCase());
+  }
+
+  private registerFeedAliases(hubSymbol: string): void {
+    for (const alias of exchangeSymbolAliases(config.exchange, hubSymbol)) {
+      this.feedToHub.set(alias, hubSymbol);
+    }
+  }
+
+  /** Resolve an inbound trade/book symbol onto the hub state key. */
+  private resolveHubSymbol(feedSymbol: string): string | undefined {
+    const upper = feedSymbol.toUpperCase();
+    const mapped = this.feedToHub.get(upper);
+    if (mapped && this.states.has(mapped)) return mapped;
+    if (this.states.has(upper)) return upper;
+    const canonical = this.canonicalSymbol(upper);
+    if (this.states.has(canonical)) return canonical;
+    return undefined;
   }
 
   streamingSymbols(): string[] {
@@ -194,9 +233,10 @@ export class MarketHub extends EventEmitter {
       "Phase 8 focus rotation enabled",
     );
     this.rotationTimer = setInterval(() => {
+      if (this.holdFocus) return;
       this.rotationIndex = (this.rotationIndex + 1) % config.symbols.length;
       const next = config.symbols[this.rotationIndex];
-      if (next) void this.focus(next);
+      if (next) void this.focus(next, null, { fromRotation: true });
     }, ms);
   }
 
@@ -214,9 +254,22 @@ export class MarketHub extends EventEmitter {
   /**
    * Stream order-flow for one symbol. Other catalog rows stay on the ticker feed.
    */
-  async focus(symbol: string, primaryInterval?: string | null): Promise<void> {
-    const normalized = symbol.trim().toUpperCase();
+  async focus(
+    symbol: string,
+    primaryInterval?: string | null,
+    opts?: { fromRotation?: boolean },
+  ): Promise<void> {
+    const normalized = this.canonicalSymbol(symbol);
     if (!normalized) return;
+    this.registerFeedAliases(normalized);
+    // Also accept the raw client spelling (UVXYUSDT) as an alias into the canonical hub key.
+    for (const alias of exchangeSymbolAliases(config.exchange, symbol)) {
+      this.feedToHub.set(alias, normalized);
+    }
+    const defaults = config.symbols.map((s) => this.canonicalSymbol(s));
+    if (!opts?.fromRotation) {
+      this.holdFocus = !defaults.includes(normalized);
+    }
     const nextPrimary =
       primaryInterval != null ? resolvePrimaryInterval(primaryInterval) : this.primaryInterval;
     const keys = [...this.states.keys()];
@@ -233,7 +286,7 @@ export class MarketHub extends EventEmitter {
     // Primary TF-only change: refresh candles in place. Keep tape/CVD/footprint/signal memory.
     if (sameSymbol && !samePrimary && this.started) {
       this.setPrimaryInterval(primaryInterval);
-      const rotIdx = config.symbols.indexOf(normalized);
+      const rotIdx = defaults.indexOf(normalized);
       if (rotIdx >= 0) this.rotationIndex = rotIdx;
       void this.loadMultiTimeframe(normalized)
         .then(() => {
@@ -246,8 +299,11 @@ export class MarketHub extends EventEmitter {
     }
 
     if (primaryInterval != null) this.setPrimaryInterval(primaryInterval);
-    const rotIdx = config.symbols.indexOf(normalized);
-    if (rotIdx >= 0) this.rotationIndex = rotIdx;
+    const rotIdx = defaults.indexOf(normalized);
+    if (rotIdx >= 0) {
+      this.rotationIndex = rotIdx;
+      if (!opts?.fromRotation) this.holdFocus = false;
+    }
     const gen = ++this.generation;
     if (this.retryTimer) {
       clearTimeout(this.retryTimer);
@@ -268,6 +324,9 @@ export class MarketHub extends EventEmitter {
         if (stale?.primaryCandleTimer) clearInterval(stale.primaryCandleTimer);
         if (stale?.footprintCloseTimer) clearTimeout(stale.footprintCloseTimer);
         this.states.delete(key);
+        for (const [alias, hub] of [...this.feedToHub.entries()]) {
+          if (hub === key) this.feedToHub.delete(alias);
+        }
       }
     }
     for (const key of [...this.snapshotTimers.keys()]) {
@@ -286,15 +345,16 @@ export class MarketHub extends EventEmitter {
    */
   async start(symbols = config.symbols, gen = this.generation): Promise<void> {
     if (gen !== this.generation) return;
-    this.bootstrapSymbols(symbols);
+    const focused = symbols.map((s) => this.canonicalSymbol(s)).filter(Boolean);
+    this.bootstrapSymbols(focused);
     if (this.started || this.connecting) return;
     this.connecting = true;
 
     try {
       // Live trade/book stream first so footprint / tape are not blocked by REST klines.
       if (gen !== this.generation) return;
-      for (const symbol of symbols) this.scheduleFootprintClose(symbol);
-      await this.adapter.connect(symbols, {
+      for (const symbol of focused) this.scheduleFootprintClose(symbol);
+      await this.adapter.connect(focused, {
         onTrade: (t) => this.onTrade(t),
         onBook: (b) => this.onBook(b),
         onHealth: (h) => this.onHealth(h),
@@ -305,7 +365,7 @@ export class MarketHub extends EventEmitter {
 
       // Hydrate candles in the background; failures must not tear down the live feed.
       void Promise.all(
-        symbols.map(async (symbol) => {
+        focused.map(async (symbol) => {
           if (gen !== this.generation) return;
           try {
             await this.loadMultiTimeframe(symbol);
@@ -341,7 +401,7 @@ export class MarketHub extends EventEmitter {
       this.retryTimer = setTimeout(() => {
         this.retryTimer = null;
         this.connecting = false;
-        void this.start(symbols, gen);
+        void this.start(focused, gen);
       }, 5_000);
       return;
     } finally {
@@ -351,10 +411,11 @@ export class MarketHub extends EventEmitter {
   }
 
   getSnapshot(symbol: string): MarketSnapshot | null {
-    const s = this.states.get(symbol.toUpperCase());
+    const key = this.resolveHubSymbol(symbol) ?? this.canonicalSymbol(symbol);
+    const s = this.states.get(key);
     if (!s) return null;
     return {
-      symbol: symbol.toUpperCase(),
+      symbol: key,
       lastPrice: s.lastPrice,
       timestamp: Date.now(),
       primaryInterval: s.primaryInterval ?? this.primaryInterval,
@@ -379,18 +440,23 @@ export class MarketHub extends EventEmitter {
   }
 
   getMicrostructure(symbol: string): MicrostructureSnapshot | null {
-    const s = this.states.get(symbol.toUpperCase());
+    const key = this.resolveHubSymbol(symbol) ?? this.canonicalSymbol(symbol);
+    const s = this.states.get(key);
     return s?.microstructure ?? null;
   }
 
   /** Cached klines for the focused symbol (primary or named interval). */
   getCandles(symbol: string, interval?: string): Candle[] | null {
-    const s = this.states.get(symbol.toUpperCase());
+    const hubKey = this.resolveHubSymbol(symbol) ?? this.canonicalSymbol(symbol);
+    const s = this.states.get(hubKey);
     if (!s) return null;
-    const key = (interval ?? s.primaryInterval ?? this.primaryInterval).toLowerCase();
-    const fromMap = s.candlesByInterval.get(key);
+    const intervalKey = (interval ?? s.primaryInterval ?? this.primaryInterval).toLowerCase();
+    const fromMap = s.candlesByInterval.get(intervalKey);
     if (fromMap?.length) return fromMap;
-    if (!interval || key === (s.primaryInterval ?? this.primaryInterval).toLowerCase()) {
+    if (
+      !interval ||
+      intervalKey === (s.primaryInterval ?? this.primaryInterval).toLowerCase()
+    ) {
       return s.candles.length ? s.candles : null;
     }
     return null;
@@ -403,35 +469,42 @@ export class MarketHub extends EventEmitter {
   }
 
   private onTrade(trade: TradeTick): void {
-    const state = this.states.get(trade.symbol);
+    const symbol = this.resolveHubSymbol(trade.symbol);
+    if (!symbol) return;
+    const state = this.states.get(symbol);
     if (!state) return;
-    archiveTradeTick(trade);
-    state.lastPrice = trade.price;
-    state.trades.push(trade);
+    const normalizedTrade =
+      trade.symbol === symbol ? trade : { ...trade, symbol };
+    archiveTradeTick(normalizedTrade);
+    state.lastPrice = normalizedTrade.price;
+    state.trades.push(normalizedTrade);
     if (state.trades.length > 500) state.trades.splice(0, state.trades.length - 500);
-    state.sessionTrades.push(trade);
+    state.sessionTrades.push(normalizedTrade);
     if (state.sessionTrades.length > 50_000) {
       state.sessionTrades.splice(0, state.sessionTrades.length - 50_000);
     }
 
-    state.cvd = applyTradeToCvd(state.cvd, trade);
-    state.footprintBuffer.push(trade);
+    state.cvd = applyTradeToCvd(state.cvd, normalizedTrade);
+    state.footprintBuffer.push(normalizedTrade);
 
-    const now = trade.timestamp || Date.now();
+    const now = normalizedTrade.timestamp || Date.now();
     if (now - state.footprintOpen >= config.footprintIntervalMs) {
-      this.closeFootprintInterval(trade.symbol, now);
+      this.closeFootprintInterval(symbol, now);
     }
 
-    this.recomputeSignal(trade.symbol);
-    this.publish(trade.symbol);
+    this.recomputeSignal(symbol);
+    this.publish(symbol);
   }
 
   private onBook(book: OrderBookSnapshot): void {
-    const state = this.states.get(book.symbol);
+    const symbol = this.resolveHubSymbol(book.symbol);
+    if (!symbol) return;
+    const state = this.states.get(symbol);
     if (!state) return;
-    state.book = book;
-    state.dom = computeDomMetrics(book);
-    const iceberg = detectIcebergRefill(book);
+    const normalizedBook = book.symbol === symbol ? book : { ...book, symbol };
+    state.book = normalizedBook;
+    state.dom = computeDomMetrics(normalizedBook);
+    const iceberg = detectIcebergRefill(normalizedBook);
     state.iceberg = iceberg;
     if (state.dom) {
       state.dom = {
@@ -447,9 +520,9 @@ export class MarketHub extends EventEmitter {
       };
     }
     if (state.dom.mid) state.lastPrice = state.dom.mid;
-    this.recomputeMicrostructure(book.symbol);
-    this.recomputeSignal(book.symbol);
-    this.publish(book.symbol);
+    this.recomputeMicrostructure(symbol);
+    this.recomputeSignal(symbol);
+    this.publish(symbol);
   }
 
   private refreshLeaderLagger(symbol: string): void {
@@ -567,6 +640,8 @@ export class MarketHub extends EventEmitter {
       { tickSize: this.tickSize(symbol) },
     );
     state.liveFootprint = bar ? { ...bar, forming: true } : undefined;
+    // Keep Volume Profile current during the forming interval (not only on close).
+    if (state.sessionTrades.length > 0) this.recomputeProfile(symbol);
   }
 
   /** Ensure intervals close on schedule even when the tape goes quiet. */

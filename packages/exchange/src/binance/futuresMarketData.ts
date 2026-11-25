@@ -8,7 +8,12 @@ const WS_HOSTS = [
   "wss://fstream.binancefuture.com",
   "wss://fstream.binance.com",
 ] as const;
-const TRADE_WATCHDOG_MS = 8_000;
+/**
+ * Host rotation when a WS endpoint accepts depth but drops aggTrade (regional blips).
+ * Keep this well above quiet TradFi/stock-perp tapes (e.g. UVXYUSDT) so thin markets
+ * are not stuck in a reconnect loop that never accumulates footprint/CVD/VP.
+ */
+const TRADE_WATCHDOG_MS = 60_000;
 
 interface DepthEvent {
   e: string;
