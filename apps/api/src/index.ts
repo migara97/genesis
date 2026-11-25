@@ -485,11 +485,17 @@ app.register(async (instance) => {
             return;
           }
           const instrument = getInstrument(config.exchange, symbol);
-          if (instrument?.status === "delisted") {
-            send("error", { error: "Symbol is delisted on this exchange" });
+          // Unknown / suspended / delisted pairs have no aggTrade tape — Footprint,
+          // CVD, and VP all sit empty together. Do not focus them.
+          if (!instrument || instrument.status !== "live") {
+            send("error", {
+              error: !instrument
+                ? `${symbol} is not listed on ${config.exchange}`
+                : `${symbol} is ${instrument.status} on ${config.exchange}`,
+            });
             return;
           }
-          if (instrument) marketHub.setTickSize(symbol, instrument.tickSize);
+          marketHub.setTickSize(symbol, instrument.tickSize);
           void marketHub.focus(symbol, msg.primaryInterval);
         }
       } catch {

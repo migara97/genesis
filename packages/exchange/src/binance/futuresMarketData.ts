@@ -14,7 +14,9 @@ const WS_HOSTS = [
   "wss://fstream.binance.com",
   "wss://fstream.binancefuture.com",
 ] as const;
-const TRADE_WATCHDOG_MS = 8_000;
+/** Only treat missing trades as a routing failure when depth is clearly alive. */
+const TRADE_WATCHDOG_MS = 12_000;
+const TRADE_WATCHDOG_MIN_DEPTH = 5;
 
 interface DepthEvent {
   e: string;
@@ -58,6 +60,7 @@ export class BinanceFuturesMarketDataAdapter implements ExchangeMarketDataAdapte
   private connId = 0;
   private wsHostIndex = 0;
   private lastTradeAt = 0;
+  private depthMsgCount = 0;
   private tradeWatchdog: NodeJS.Timeout | null = null;
   private marketOpen = false;
   private publicOpen = false;
@@ -128,6 +131,32 @@ export class BinanceFuturesMarketDataAdapter implements ExchangeMarketDataAdapte
     };
   }
 
+  async fetchRecentTrades(symbol: string, limit = 500): Promise<TradeTick[]> {
+    const capped = Math.min(Math.max(1, limit), 1000);
+    const url = `${REST}/fapi/v1/aggTrades?symbol=${symbol.toUpperCase()}&limit=${capped}`;
+    const res = await fetch(url);
+    if (!res.ok) {
+      throw new Error(`Binance aggTrades failed: ${res.status} (${symbol.toUpperCase()})`);
+    }
+    const raw = (await res.json()) as {
+      a: number;
+      p: string;
+      q: string;
+      T: number;
+      m: boolean;
+    }[];
+    return raw.map((ev) => ({
+      exchange: this.id,
+      symbol: symbol.toUpperCase(),
+      tradeId: String(ev.a),
+      price: Number(ev.p),
+      quantity: Number(ev.q),
+      buyerAggressor: !ev.m,
+      aggressorSource: "exchange_flag" as const,
+      timestamp: ev.T,
+    }));
+  }
+
   private async openSockets(): Promise<void> {
     const connId = ++this.connId;
     const host = WS_HOSTS[this.wsHostIndex % WS_HOSTS.length]!;
@@ -136,6 +165,7 @@ export class BinanceFuturesMarketDataAdapter implements ExchangeMarketDataAdapte
     const depthStreams = ids.map((id) => `${id}@depth@100ms`).join("/");
 
     this.lastTradeAt = 0;
+    this.depthMsgCount = 0;
     this.clearTradeWatchdog();
     this.closeSockets();
     this.marketOpen = false;
@@ -157,11 +187,13 @@ export class BinanceFuturesMarketDataAdapter implements ExchangeMarketDataAdapte
 
     if (connId !== this.connId) return;
 
+    // Fresh dual-socket session — clear backoff so a blip does not keep the desk dark.
+    this.reconnectAttempts = 0;
     this.health = {
       ...this.health,
       connected: this.marketOpen && this.publicOpen,
       lastError: undefined,
-      reconnectAttempts: this.reconnectAttempts,
+      reconnectAttempts: 0,
       symbols: this.symbols,
       lastMessageAt: Date.now(),
     };
@@ -228,15 +260,29 @@ export class BinanceFuturesMarketDataAdapter implements ExchangeMarketDataAdapte
   }
 
   private scheduleReconnect(rotateHost = false): void {
+    if (!this.shouldRun) return;
     if (this.reconnectTimer) return;
     this.reconnectAttempts += 1;
     if (rotateHost) this.wsHostIndex = (this.wsHostIndex + 1) % WS_HOSTS.length;
-    const delay = Math.min(30_000, 1000 * 2 ** Math.min(this.reconnectAttempts, 5));
-    this.health = { ...this.health, reconnectAttempts: this.reconnectAttempts };
+    // Keep recovery fast so Footprint/CVD/VP do not sit empty for long after a socket drop.
+    const delay = Math.min(8_000, 500 * 2 ** Math.min(this.reconnectAttempts, 4));
+    this.health = {
+      ...this.health,
+      connected: false,
+      reconnectAttempts: this.reconnectAttempts,
+      lastError: `Reconnecting Futures WS (attempt ${this.reconnectAttempts})…`,
+    };
     this.emitHealth();
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
-      void this.openSockets().catch((err) => this.handlers?.onError?.(err as Error));
+      if (!this.shouldRun) return;
+      void this.openSockets().catch((err) => {
+        this.handlers?.onError?.(err as Error);
+        this.health = { ...this.health, lastError: (err as Error).message, connected: false };
+        this.emitHealth();
+        // Never give up — tape panels share this feed; a stuck adapter stops everything at once.
+        this.scheduleReconnect(true);
+      });
     }, delay);
   }
 
@@ -245,9 +291,21 @@ export class BinanceFuturesMarketDataAdapter implements ExchangeMarketDataAdapte
     this.tradeWatchdog = setTimeout(() => {
       if (connId !== this.connId || !this.shouldRun) return;
       if (this.lastTradeAt > 0) return;
+      // Quiet / invalid / illiquid symbols get depth-or-nothing with zero trades.
+      // Only rotate when the book is clearly alive — that means /market routing is wrong.
+      if (this.depthMsgCount < TRADE_WATCHDOG_MIN_DEPTH) {
+        this.health = {
+          ...this.health,
+          lastError: `No aggTrade yet for ${this.symbols.join(",")} (market may be quiet or invalid)`,
+        };
+        this.emitHealth();
+        // Keep sockets up; re-arm so a later routing failure can still be detected.
+        this.armTradeWatchdog(connId);
+        return;
+      }
       const host = WS_HOSTS[this.wsHostIndex % WS_HOSTS.length];
       const err = new Error(
-        `No aggTrade messages from ${host}/market within ${TRADE_WATCHDOG_MS}ms; rotating Futures WS host`,
+        `Depth flowing but no aggTrade from ${host}/market within ${TRADE_WATCHDOG_MS}ms; rotating Futures WS host`,
       );
       this.health = { ...this.health, lastError: err.message };
       this.emitHealth();
@@ -313,6 +371,7 @@ export class BinanceFuturesMarketDataAdapter implements ExchangeMarketDataAdapte
   }
 
   private handleDepth(ev: DepthEvent): void {
+    this.depthMsgCount += 1;
     let book = this.books.get(ev.s);
     if (!book) {
       book = new LocalBook(ev.s);

@@ -20,6 +20,8 @@ export interface ExchangeMarketDataAdapter {
   getHealth(): ConnectionHealth;
   fetchKlines(symbol: string, interval: string, limit?: number): Promise<Candle[]>;
   fetchOrderBookSnapshot(symbol: string, limit?: number): Promise<OrderBookSnapshot>;
+  /** Optional REST tape seed so Footprint/CVD/VP are not empty until the first live tick. */
+  fetchRecentTrades?(symbol: string, limit?: number): Promise<TradeTick[]>;
 }
 
 export interface ExchangeTradingAdapter {

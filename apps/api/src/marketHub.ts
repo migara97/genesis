@@ -303,6 +303,10 @@ export class MarketHub extends EventEmitter {
       if (gen !== this.generation) return;
       this.started = true;
 
+      // Seed tape from REST so Footprint/CVD/VP are not empty until the first live tick.
+      // Signal Engine code is untouched — this only supplies the same trade inputs earlier.
+      void this.seedRecentTrades(symbols, gen);
+
       // Hydrate candles in the background; failures must not tear down the live feed.
       void Promise.all(
         symbols.map(async (symbol) => {
@@ -406,6 +410,52 @@ export class MarketHub extends EventEmitter {
     const state = this.states.get(trade.symbol);
     if (!state) return;
     archiveTradeTick(trade);
+    this.applyTradeTick(trade, state, { live: true });
+    this.recomputeSignal(trade.symbol);
+    this.publish(trade.symbol);
+  }
+
+  /**
+   * REST tape backfill for desk panels. Does not change Signal Engine logic —
+   * only feeds existing trade → CVD / footprint / VP paths once up front.
+   */
+  private async seedRecentTrades(symbols: string[], gen: number): Promise<void> {
+    const fetchRecent = this.adapter.fetchRecentTrades?.bind(this.adapter);
+    if (!fetchRecent) return;
+    for (const symbol of symbols) {
+      if (gen !== this.generation) return;
+      try {
+        const trades = await fetchRecent(symbol, 500);
+        if (gen !== this.generation) return;
+        const state = this.states.get(symbol);
+        if (!state || state.sessionTrades.length > 0) continue;
+        for (const trade of trades) {
+          archiveTradeTick(trade);
+          this.applyTradeTick(trade, state, { live: false });
+        }
+        this.refreshLiveFootprint(symbol);
+        this.recomputeProfile(symbol);
+        this.recomputeSignal(symbol);
+        this.publish(symbol);
+      } catch (err) {
+        const state = this.states.get(symbol);
+        if (state) {
+          state.health = {
+            ...state.health,
+            lastError: (err as Error).message,
+          };
+          this.publish(symbol);
+        }
+        this.emit("error", err);
+      }
+    }
+  }
+
+  private applyTradeTick(
+    trade: TradeTick,
+    state: SymbolState,
+    opts: { live: boolean },
+  ): void {
     state.lastPrice = trade.price;
     state.trades.push(trade);
     if (state.trades.length > 500) state.trades.splice(0, state.trades.length - 500);
@@ -417,13 +467,11 @@ export class MarketHub extends EventEmitter {
     state.cvd = applyTradeToCvd(state.cvd, trade);
     state.footprintBuffer.push(trade);
 
+    if (!opts.live) return;
     const now = trade.timestamp || Date.now();
     if (now - state.footprintOpen >= config.footprintIntervalMs) {
       this.closeFootprintInterval(trade.symbol, now);
     }
-
-    this.recomputeSignal(trade.symbol);
-    this.publish(trade.symbol);
   }
 
   private onBook(book: OrderBookSnapshot): void {

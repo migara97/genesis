@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { ConnectionHealth, MarketSnapshot } from "./types";
 
 const PRIMARY_KEY = "genesis.primaryInterval";
+const PING_MS = 15_000;
 
 export function readStoredPrimaryInterval(): "5m" | "15m" {
   try {
@@ -46,40 +47,71 @@ export function useMarketSocket() {
   const wsRef = useRef<WebSocket | null>(null);
   const symbolRef = useRef<string | null>(null);
   const primaryRef = useRef<"5m" | "15m">(readStoredPrimaryInterval());
+  const pingRef = useRef<number | undefined>(undefined);
 
   useEffect(() => {
     let ws: WebSocket | null = null;
     let closed = false;
     let timer: number | undefined;
 
+    const clearPing = () => {
+      if (pingRef.current != null) {
+        window.clearInterval(pingRef.current);
+        pingRef.current = undefined;
+      }
+    };
+
+    const sendSubscribe = (socket: WebSocket) => {
+      if (!symbolRef.current) return;
+      socket.send(
+        JSON.stringify({
+          type: "subscribe",
+          symbol: symbolRef.current,
+          primaryInterval: primaryRef.current,
+        }),
+      );
+    };
+
     const connect = () => {
+      if (closed) return;
+      clearPing();
+      try {
+        ws?.close();
+      } catch {
+        // ignore
+      }
       ws = new WebSocket(wsUrl());
       wsRef.current = ws;
+
       ws.onopen = () => {
         setConnected(true);
         setError(null);
         retryRef.current = 0;
-        if (symbolRef.current) {
-          ws?.send(
-            JSON.stringify({
-              type: "subscribe",
-              symbol: symbolRef.current,
-              primaryInterval: primaryRef.current,
-            }),
-          );
-        }
+        sendSubscribe(ws!);
+        clearPing();
+        pingRef.current = window.setInterval(() => {
+          if (wsRef.current?.readyState === WebSocket.OPEN) {
+            wsRef.current.send(JSON.stringify({ type: "ping" }));
+          }
+        }, PING_MS);
       };
+
       ws.onclose = () => {
         setConnected(false);
+        clearPing();
         if (closed) return;
-        const delay = Math.min(10_000, 1000 * 2 ** retryRef.current);
+        // Fast reconnect after API restart / proxy blip so desk panels recover together.
+        const delay = Math.min(4_000, 400 * 2 ** Math.min(retryRef.current, 4));
         retryRef.current += 1;
+        setError("WebSocket reconnecting…");
         timer = window.setTimeout(connect, delay);
       };
+
       // Browser fires error before close on proxy blips; don't sticky-lock the banner.
       ws.onerror = () => {
         if (!closed) setError("WebSocket reconnecting…");
       };
+
       ws.onmessage = (ev) => {
         try {
           const msg = JSON.parse(ev.data as string) as {
@@ -101,14 +133,8 @@ export function useMarketSocket() {
               null;
             if (first && !symbolRef.current) {
               symbolRef.current = first;
-              ws?.send(
-                JSON.stringify({
-                  type: "subscribe",
-                  symbol: first,
-                  primaryInterval: primaryRef.current,
-                }),
-              );
             }
+            if (first) sendSubscribe(ws!);
             if (payload.snapshots?.[0]?.health) setHealth(payload.snapshots[0].health);
           } else if (msg.type === "snapshot") {
             const snap = msg.payload as MarketSnapshot;
@@ -117,6 +143,8 @@ export function useMarketSocket() {
             setError(null);
           } else if (msg.type === "health") {
             setHealth(msg.payload as ConnectionHealth);
+          } else if (msg.type === "pong") {
+            // keepalive ack
           } else if (msg.type === "alert") {
             const fire = msg.payload as {
               id?: string;
@@ -149,9 +177,27 @@ export function useMarketSocket() {
       };
     };
 
+    const onVisible = () => {
+      if (document.visibilityState !== "visible" || closed) return;
+      const state = wsRef.current?.readyState;
+      if (state !== WebSocket.OPEN && state !== WebSocket.CONNECTING) {
+        retryRef.current = 0;
+        if (timer) window.clearTimeout(timer);
+        connect();
+      } else if (state === WebSocket.OPEN && symbolRef.current) {
+        sendSubscribe(wsRef.current!);
+      }
+    };
+
     connect();
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("online", onVisible);
+
     return () => {
       closed = true;
+      clearPing();
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("online", onVisible);
       if (timer) window.clearTimeout(timer);
       ws?.close();
     };
