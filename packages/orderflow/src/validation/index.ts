@@ -5,4 +5,3 @@ export * from "./regime.js";
 export * from "./paperStrata.js";
 export * from "./versions.js";
 export * from "./parity.js";
-export * from "./parity.js";

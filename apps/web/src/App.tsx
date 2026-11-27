@@ -1262,13 +1262,27 @@ function SignalBoard({
             {strataChips(validation.byPrimaryTimeframe as Record<string, PerfSlice> | undefined, "TF")}
             {strataChips(validation.byLiquidity as Record<string, PerfSlice> | undefined, "Liq")}
             {strataChips(validation.byRangeContext as Record<string, PerfSlice> | undefined, "Range")}
+            {strataChips(validation.byAxiaQuality as Record<string, PerfSlice> | undefined, "Axia")}
             {Object.keys(
               (validation.byPrimaryTimeframe as object | undefined) ?? {},
             ).length +
               Object.keys((validation.byLiquidity as object | undefined) ?? {}).length +
-              Object.keys((validation.byRangeContext as object | undefined) ?? {}).length ===
+              Object.keys((validation.byRangeContext as object | undefined) ?? {}).length +
+              Object.keys((validation.byAxiaQuality as object | undefined) ?? {}).length ===
               0 && <span className="chip">No strata yet</span>}
           </div>
+          {validation?.axiaVetoReadiness ? (
+            <div className="desk-metrics" style={{ marginTop: 8 }}>
+              <span className="muted">Axia veto readiness</span>
+              <span>
+                <span className="chip ok">Engine veto OFF</span> · status{" "}
+                {String(
+                  (validation.axiaVetoReadiness as { status?: string }).status ??
+                    "deferred_measure_first",
+                )}
+              </span>
+            </div>
+          ) : null}
         </>
       ) : (
         <p className="disclaimer">Validation report loading…</p>
@@ -1285,6 +1299,21 @@ function SignalBoard({
       {validation?.phase11Note ? (
         <p className="disclaimer">{String(validation.phase11Note)}</p>
       ) : null}
+      {validation?.phase13Note ? (
+        <p className="disclaimer">{String(validation.phase13Note)}</p>
+      ) : null}
+      {validation?.paperModeReminder ? (
+        <p className="disclaimer">{String(validation.paperModeReminder)}</p>
+      ) : null}
+      {Array.isArray(
+        (validation?.axiaVetoReadiness as { notes?: string[] } | undefined)?.notes,
+      )
+        ? ((validation!.axiaVetoReadiness as { notes: string[] }).notes).map((note) => (
+            <p className="disclaimer" key={`axia-${note.slice(0, 48)}`}>
+              {note}
+            </p>
+          ))
+        : null}
       {Array.isArray((validation?.gates as { notes?: string[] } | undefined)?.notes)
         ? ((validation!.gates as { notes: string[] }).notes).map((note) => (
             <p key={note} className="disclaimer">

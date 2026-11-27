@@ -50,6 +50,8 @@ export function buildHealthPayload(executionMode: string) {
     tls: tlsInfo,
     dataPolicy:
       "Live public market data via modular exchange adapters (OKX default, Binance/Bybit optional). Aggressor flags are exchange-reported when provided. Institutional identity is never claimed. Secrets never leave the API.",
+    phase13MeasureFirst:
+      "Axia quality tags are observational. WAIT veto for break_q_low/hang is OFF. Keep PAPER until Phase 8 claimable; compare GET /api/validation/report → byAxiaQuality / axiaVetoReadiness.",
   };
 }
 

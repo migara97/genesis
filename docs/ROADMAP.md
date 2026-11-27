@@ -58,8 +58,10 @@
 - [x] Footprint history ring (12 bars) in MarketHub
 - [x] Paper `ofSnapshot.axiaQuality` + regime strata tags
 - [x] Commentary line (never mutates scores)
+- [x] `byAxiaQuality` + `axiaVetoReadiness` on validation report (veto stays OFF)
+- [x] PAPER measure-first docs / UI / health reminders
 - [x] `docs/PHASE13_AXIA_QUALITY.md` + unit tests
-- [ ] Optional WAIT veto from break_q_low / hang (requires Phase 8 claimable + approval)
+- [ ] Optional WAIT veto from break_q_low / hang — **deferred** until claimable underperformance + human unlock
 
 ## Phase 2 — Advanced Microstructure (legacy; covered by Phase 11)
 - [x] Iceberg / refill heuristics with confidence bands

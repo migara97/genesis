@@ -38,6 +38,7 @@ Open / INVALIDATED / TIMEOUT / EXPIRED never count as wins or losses.
 3. `FOCUS_ROTATION_MS` (default `900000` = 15m) rotates OF focus across `DEFAULT_SYMBOLS`
 4. Only the **focused** symbol gets live OF / TP–SL updates; others wait until rotated back
 5. UI: Signal Engine → **Phase 8 — Accuracy freeze**, or `GET /api/validation/report`
+6. Phase 13: also watch **Axia** strata chips + `axiaVetoReadiness` — WAIT veto stays OFF until claimable review (see [PHASE13_AXIA_QUALITY.md](./PHASE13_AXIA_QUALITY.md))
 
 ## Decision rule
 

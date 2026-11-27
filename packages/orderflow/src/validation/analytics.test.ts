@@ -4,6 +4,8 @@ import {
   computeCalibration,
   computePerformance,
   evaluateAccuracyGates,
+  evaluateAxiaVetoReadiness,
+  groupByAxiaQuality,
   groupByKey,
   wilsonInterval,
 } from "./analytics.js";
@@ -178,6 +180,69 @@ describe("validation analytics", () => {
     const byTf = groupByKey(samples, (s) => s.primaryTimeframe);
     assert.equal(byTf["5m"]?.closedTrades, 1);
     assert.equal(byTf["15m"]?.closedTrades, 1);
+  });
+
+  it("groupByAxiaQuality + evaluateAxiaVetoReadiness stay measure-first (veto OFF)", () => {
+    const samples = [
+      sample({
+        setupId: "hang1",
+        regimeTags: ["break_hang", "break_q_low"],
+        netPnl: -2,
+        won: false,
+        outcome: "HIT_SL",
+      }),
+      sample({
+        setupId: "high1",
+        regimeTags: ["break_q_high"],
+        netPnl: 3,
+        won: true,
+        outcome: "HIT_TP",
+      }),
+    ];
+    const byAxia = groupByAxiaQuality(samples);
+    assert.equal(byAxia.break_hang?.closedTrades, 1);
+    assert.equal(byAxia.break_q_low?.closedTrades, 1);
+    assert.equal(byAxia.break_q_high?.closedTrades, 1);
+
+    const overall = computePerformance(samples, 0);
+    const early = evaluateAxiaVetoReadiness({
+      overall,
+      byAxiaQuality: byAxia,
+      overallClaimable: false,
+    });
+    assert.equal(early.vetoEnabledInEngine, false);
+    assert.equal(early.status, "deferred_measure_first");
+
+    const fat = Array.from({ length: PHASE8_GATES.stratumMinResolved }, (_, i) =>
+      sample({
+        setupId: `w${i}`,
+        regimeTags: ["break_q_low", "break_hang"],
+        netPnl: -1,
+        won: false,
+        outcome: "HIT_SL",
+      }),
+    );
+    const fatOverall = Array.from({ length: PHASE8_GATES.overallMinResolved }, (_, i) =>
+      sample({
+        setupId: `o${i}`,
+        regimeTags: i < 30 ? ["break_q_low"] : ["break_q_high"],
+        netPnl: i < 30 ? -1 : 2,
+        won: i >= 30,
+        outcome: i < 30 ? "HIT_SL" : "HIT_TP",
+      }),
+    );
+    const byFat = groupByAxiaQuality(fatOverall);
+    const ready = evaluateAxiaVetoReadiness({
+      overall: computePerformance(fatOverall, 0),
+      byAxiaQuality: byFat,
+      overallClaimable: true,
+    });
+    assert.equal(ready.vetoEnabledInEngine, false);
+    assert.ok(
+      ready.status === "candidate_for_review" || ready.status === "not_enough_data",
+    );
+    assert.ok(ready.notes.some((n) => /veto remains OFF|observational/i.test(n)));
+    assert.equal(fat.length, PHASE8_GATES.stratumMinResolved);
   });
 });
 

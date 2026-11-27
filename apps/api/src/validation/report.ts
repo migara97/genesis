@@ -4,6 +4,8 @@ import {
   computeCalibration,
   computePerformance,
   evaluateAccuracyGates,
+  evaluateAxiaVetoReadiness,
+  groupByAxiaQuality,
   groupByKey,
   groupByRegime,
   type ClosedTradeSample,
@@ -106,6 +108,7 @@ export function buildValidationReport(
   const byRangeContext = groupByKey(allSamples, (s) =>
     s.regimeTags.filter((t) => t === "post_pump_compression" || t === "clean_range"),
   );
+  const byAxiaQuality = groupByAxiaQuality(allSamples);
   const bySetupClass = groupByKey(allSamples, (s) => s.setupClass ?? "OTHER");
   const byRegime = groupByRegime(allSamples);
 
@@ -133,6 +136,12 @@ export function buildValidationReport(
     bySetupClass,
     activeConfigVersion: activeConfig,
     locked,
+  });
+
+  const axiaVetoReadiness = evaluateAxiaVetoReadiness({
+    overall: performance,
+    byAxiaQuality,
+    overallClaimable: gates.overallClaimable,
   });
 
   const sym = symbol ?? config.symbols[0] ?? "BTCUSDT";
@@ -182,6 +191,8 @@ export function buildValidationReport(
     byPrimaryTimeframe: sanitizeMap(byPrimaryTimeframe),
     byLiquidity: sanitizeMap(byLiquidity),
     byRangeContext: sanitizeMap(byRangeContext),
+    byAxiaQuality: sanitizeMap(byAxiaQuality),
+    axiaVetoReadiness,
     performanceByConfigVersion,
     calibration,
     openTrades: opts?.setupClass ? open.length : allOpen.length,
@@ -207,8 +218,16 @@ export function buildValidationReport(
         "Iceberg/refill + leader/lagger + R4 auction shadow are heuristics with confidence bands. Strategy plugins are weight-0. Commentary/auction shadow never mutates scores. See GET /api/microstructure.",
       phase12:
         "Scale-out paper ledger + sizing profiles + favorites alerts + LIVE audit. See docs/PHASE12_PRODUCT.md.",
+      phase13:
+        "Axia quality shadow + byAxiaQuality strata. WAIT veto stays OFF (axiaVetoReadiness.vetoEnabledInEngine=false) until claimable weak-tag underperformance is reviewed.",
     },
     phase11Note:
       "Phase 11 microstructure — heuristic only; does not unlock weight changes or claim institutional detection.",
+    phase13Note:
+      "Phase 13 measure-first: keep EXECUTION_MODE=PAPER. Compare byAxiaQuality (break_q_low / break_hang). Do not enable WAIT veto until axiaVetoReadiness.status is candidate_for_review and a human unlocks it.",
+    paperModeReminder:
+      config.executionMode === "PAPER"
+        ? "PAPER mode active — leave streaming until gates.overallClaimable (≥100 resolved TP/SL)."
+        : `Execution mode is ${config.executionMode} — Phase 8 sample growth expects PAPER.`,
   };
 }

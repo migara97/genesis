@@ -278,6 +278,140 @@ export function groupByRegime(
   return groupByKey(samples, (s) => s.regimeTags);
 }
 
+/** Phase 13 observational Axia-quality regime tags used for strata compare. */
+export const AXIA_QUALITY_REGIME_TAGS = [
+  "break_q_high",
+  "break_q_low",
+  "delta_eff_high",
+  "delta_eff_low",
+  "break_hang",
+  "hl_exhaustion",
+  "hl_absorption",
+  "hl_v_reversal",
+] as const;
+
+export type AxiaQualityRegimeTag = (typeof AXIA_QUALITY_REGIME_TAGS)[number];
+
+export function groupByAxiaQuality(
+  samples: ClosedTradeSample[],
+): Record<string, PerformanceReport> {
+  const tagSet = new Set<string>(AXIA_QUALITY_REGIME_TAGS);
+  return groupByKey(samples, (s) => s.regimeTags.filter((t) => tagSet.has(t)));
+}
+
+/**
+ * Measure-first readiness for a future optional WAIT veto.
+ * Never enables a gate — only reports whether data could support considering one.
+ */
+export interface AxiaVetoReadiness {
+  /** Always false until a future approved research unlock wires generateSignal. */
+  vetoEnabledInEngine: false;
+  status: "deferred_measure_first" | "not_enough_data" | "candidate_for_review";
+  stratumMinResolved: number;
+  overallClaimable: boolean;
+  tags: Record<
+    string,
+    {
+      closedTrades: number;
+      claimable: boolean;
+      expectancy: number | null;
+      winRate: number | null;
+    }
+  >;
+  /** Weak-break tags under review for a future veto. */
+  weakTags: string[];
+  /** Strong-break reference tags. */
+  strongTags: string[];
+  notes: string[];
+}
+
+export function evaluateAxiaVetoReadiness(args: {
+  overall: PerformanceReport;
+  byAxiaQuality: Record<string, PerformanceReport>;
+  overallClaimable: boolean;
+  stratumMin?: number;
+}): AxiaVetoReadiness {
+  const stratumMin = args.stratumMin ?? PHASE8_GATES.stratumMinResolved;
+  const weakTags = ["break_q_low", "break_hang"] as const;
+  const strongTags = ["break_q_high"] as const;
+  const tags: AxiaVetoReadiness["tags"] = {};
+  const notes: string[] = [
+    "Axia WAIT veto remains OFF — shadow tags are observational only (Phase 13).",
+    "Do not enable generateSignal veto until overall + weak-tag strata are claimable and reviewed.",
+  ];
+
+  for (const key of AXIA_QUALITY_REGIME_TAGS) {
+    const perf = args.byAxiaQuality[key];
+    tags[key] = {
+      closedTrades: perf?.closedTrades ?? 0,
+      claimable: (perf?.closedTrades ?? 0) >= stratumMin,
+      expectancy: perf?.expectancy ?? null,
+      winRate: perf?.winRate ?? null,
+    };
+  }
+
+  const weakClaimable = weakTags.filter((t) => tags[t]?.claimable);
+  const overallExp = args.overall.expectancy;
+
+  if (!args.overallClaimable) {
+    notes.push(
+      `Overall not claimable (${args.overall.closedTrades} resolved) — keep PAPER measuring.`,
+    );
+    return {
+      vetoEnabledInEngine: false,
+      status: "deferred_measure_first",
+      stratumMinResolved: stratumMin,
+      overallClaimable: false,
+      tags,
+      weakTags: [...weakTags],
+      strongTags: [...strongTags],
+      notes,
+    };
+  }
+
+  if (weakClaimable.length === 0) {
+    notes.push(
+      `Need ≥${stratumMin} resolved on break_q_low and/or break_hang before veto review.`,
+    );
+    return {
+      vetoEnabledInEngine: false,
+      status: "not_enough_data",
+      stratumMinResolved: stratumMin,
+      overallClaimable: true,
+      tags,
+      weakTags: [...weakTags],
+      strongTags: [...strongTags],
+      notes,
+    };
+  }
+
+  let weakUnderperforms = false;
+  for (const t of weakClaimable) {
+    const exp = tags[t]!.expectancy;
+    if (exp != null && overallExp != null && exp < overallExp) {
+      weakUnderperforms = true;
+      notes.push(
+        `${t} expectancy ${exp.toFixed(4)} < overall ${overallExp.toFixed(4)} (n=${tags[t]!.closedTrades}) — candidate for human review only.`,
+      );
+    } else if (exp != null && overallExp != null) {
+      notes.push(
+        `${t} expectancy ${exp.toFixed(4)} is not worse than overall ${overallExp.toFixed(4)} — do not veto.`,
+      );
+    }
+  }
+
+  return {
+    vetoEnabledInEngine: false,
+    status: weakUnderperforms ? "candidate_for_review" : "not_enough_data",
+    stratumMinResolved: stratumMin,
+    overallClaimable: true,
+    tags,
+    weakTags: [...weakTags],
+    strongTags: [...strongTags],
+    notes,
+  };
+}
+
 /**
  * Group samples by a string key or by each tag in an array of keys.
  */
