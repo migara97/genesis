@@ -17,6 +17,7 @@ export * from "./tapeReplay.js";
 export * from "./icebergRefill.js";
 export * from "./leaderLagger.js";
 export * from "./auctionModel.js";
+export * from "./axiaQualityShadow.js";
 export * from "./strategyPlugins.js";
 export * from "./commentary.js";
 export * from "./validation/index.js";

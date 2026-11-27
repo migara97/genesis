@@ -8,6 +8,7 @@ import {
   buildMultiTimeframeContext,
   buildVolumeProfile,
   computeAuctionShadow,
+  computeAxiaQualityShadow,
   computeDomMetrics,
   computeLeaderLagger,
   createCvdState,
@@ -28,6 +29,7 @@ import {
 } from "@of/orderflow";
 import type {
   AuctionShadowSnapshot,
+  AxiaQualityShadowSnapshot,
   BreakRetestState,
   Candle,
   ChartOverlayState,
@@ -83,6 +85,8 @@ interface SymbolState {
   footprint?: FootprintBar;
   /** In-progress interval rebuilt on the publish cadence for real-time UI. */
   liveFootprint?: FootprintBar;
+  /** Recent closed footprints for Axia hang/absorb persistence (observational). */
+  footprintHistory: FootprintBar[];
   footprintBuffer: TradeTick[];
   footprintOpen: number;
   footprintCloseTimer?: NodeJS.Timeout;
@@ -100,6 +104,7 @@ interface SymbolState {
   iceberg?: IcebergRefillSignal;
   leaderLagger?: LeaderLaggerReport;
   auctionShadow?: AuctionShadowSnapshot;
+  axiaQuality?: AxiaQualityShadowSnapshot;
   microstructure?: MicrostructureSnapshot;
   lastPrice: number;
   primaryInterval: DeskPrimaryInterval;
@@ -157,6 +162,7 @@ export class MarketHub extends EventEmitter {
         trades: [],
         sessionTrades: [],
         cvd: createCvdState(symbol, sessionStart),
+        footprintHistory: [],
         footprintBuffer: [],
         footprintOpen: Date.now(),
         candles: [],
@@ -565,11 +571,20 @@ export class MarketHub extends EventEmitter {
       cvd: state.cvd,
       breakRetest: state.breakRetest,
     });
+    state.axiaQuality = computeAxiaQualityShadow({
+      symbol,
+      lastPrice: state.lastPrice,
+      footprint: state.footprint,
+      footprintHistory: state.footprintHistory,
+      breakRetest: state.breakRetest,
+      barIndex: Math.max(0, state.candles.length - 1),
+    });
     const commentary = buildCommentary({
       signal: state.signal,
       iceberg: state.iceberg,
       leaderLagger: state.leaderLagger,
       auctionShadow: state.auctionShadow,
+      axiaQuality: state.axiaQuality,
       lastPrice: state.lastPrice,
     });
     state.microstructure = {
@@ -591,6 +606,7 @@ export class MarketHub extends EventEmitter {
           }
         : undefined,
       auctionShadow: state.auctionShadow,
+      axiaQuality: state.axiaQuality,
       commentary: {
         text: commentary.text,
         source: "template",
@@ -679,6 +695,7 @@ export class MarketHub extends EventEmitter {
       );
       if (bar) {
         state.footprint = { ...bar, forming: false };
+        state.footprintHistory = [...state.footprintHistory, state.footprint].slice(-12);
         // Keep showing the closed bar in the Footprint panel until the next interval has trades.
         state.liveFootprint = undefined;
         closed = true;
@@ -899,7 +916,7 @@ export class MarketHub extends EventEmitter {
       breakRetest: state.breakRetest,
     });
     state.signal = applySignalLifecycle(previous, candidate, state.lastPrice, now);
-    // Refresh R4 auction shadow before paper freeze (observational; no score mutation).
+    // Refresh observational shadows before paper freeze (no score mutation).
     state.auctionShadow = computeAuctionShadow({
       symbol,
       lastPrice: state.lastPrice,
@@ -907,6 +924,14 @@ export class MarketHub extends EventEmitter {
       footprint: state.footprint,
       cvd: state.cvd,
       breakRetest: state.breakRetest,
+    });
+    state.axiaQuality = computeAxiaQualityShadow({
+      symbol,
+      lastPrice: state.lastPrice,
+      footprint: state.footprint,
+      footprintHistory: state.footprintHistory,
+      breakRetest: state.breakRetest,
+      barIndex: Math.max(0, state.candles.length - 1),
     });
     try {
       recordSignalLifecycle(previous, state.signal, state.lastPrice, config.exchange);
@@ -950,6 +975,16 @@ export class MarketHub extends EventEmitter {
                 aggressionScore: state.auctionShadow.aggressionScore,
                 followThrough: state.auctionShadow.followThrough,
                 failedAuction: state.auctionShadow.failedAuction,
+              }
+            : undefined,
+          axiaQuality: state.axiaQuality
+            ? {
+                deltaEfficiency: state.axiaQuality.deltaEfficiency,
+                breakQuality: state.axiaQuality.breakQuality,
+                hangBars: state.axiaQuality.hangBars,
+                hangDetected: state.axiaQuality.hangDetected,
+                highLowFormation: state.axiaQuality.highLowFormation,
+                absorptionPersistence: state.axiaQuality.absorptionPersistence,
               }
             : undefined,
         },

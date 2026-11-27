@@ -56,6 +56,18 @@ export interface AuctionShadowSnapshot {
   mutatesScores: false;
 }
 
+export interface AxiaQualityShadowSnapshot {
+  deltaEfficiency: number;
+  breakQuality: number;
+  hangBars: number;
+  hangDetected: boolean;
+  highLowFormation: string;
+  absorptionPersistence: number;
+  notes: string[];
+  evidence: { kind: string; note: string }[];
+  mutatesScores: false;
+}
+
 export interface MicrostructureSnapshot {
   iceberg?: DomMetrics["iceberg"];
   leaderLagger?: {
@@ -65,6 +77,7 @@ export interface MicrostructureSnapshot {
     focusChangePct24h: number | null;
   };
   auctionShadow?: AuctionShadowSnapshot;
+  axiaQuality?: AxiaQualityShadowSnapshot;
   commentary?: {
     text: string;
     source: "template";

@@ -267,6 +267,13 @@ export default function App() {
                   : "-"}{" "}
                 (R4 observational)
               </span>
+              <span className="muted">Axia quality</span>
+              <span>
+                {snap?.microstructure?.axiaQuality
+                  ? `Δeff ${snap.microstructure.axiaQuality.deltaEfficiency.toFixed(2)} · breakQ ${snap.microstructure.axiaQuality.breakQuality.toFixed(2)} · HL ${snap.microstructure.axiaQuality.highLowFormation}${snap.microstructure.axiaQuality.hangDetected ? " · hang" : ""}`
+                  : "-"}{" "}
+                (P13 observational)
+              </span>
             </div>
             {snap?.microstructure?.commentary?.text ? (
               <p className="disclaimer" style={{ marginBottom: 8 }}>

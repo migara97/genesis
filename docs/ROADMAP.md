@@ -52,6 +52,15 @@
 - [x] `GET /api/microstructure` + DOM/UI chips
 - [x] `docs/PHASE11_MICROSTRUCTURE.md` + unit tests
 
+## Phase 13 — Axia quality shadow (observational)
+- [x] deltaEfficiency / breakQuality / hang-time heuristics
+- [x] highLowFormation + absorptionPersistence
+- [x] Footprint history ring (12 bars) in MarketHub
+- [x] Paper `ofSnapshot.axiaQuality` + regime strata tags
+- [x] Commentary line (never mutates scores)
+- [x] `docs/PHASE13_AXIA_QUALITY.md` + unit tests
+- [ ] Optional WAIT veto from break_q_low / hang (requires Phase 8 claimable + approval)
+
 ## Phase 2 — Advanced Microstructure (legacy; covered by Phase 11)
 - [x] Iceberg / refill heuristics with confidence bands
 - [x] Multi-symbol correlation / leader-lagger

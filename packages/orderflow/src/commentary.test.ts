@@ -68,6 +68,17 @@ describe("buildCommentary", () => {
         evidence: [],
         mutatesScores: false,
       },
+      axiaQuality: {
+        deltaEfficiency: 0.3,
+        breakQuality: 0.4,
+        hangBars: 4,
+        hangDetected: true,
+        highLowFormation: "absorption",
+        absorptionPersistence: 0.7,
+        notes: [],
+        evidence: [],
+        mutatesScores: false,
+      },
     });
     assert.equal(out.source, "template");
     assert.equal(out.mutatesScores, false);
@@ -75,6 +86,7 @@ describe("buildCommentary", () => {
     assert.ok(/Model score/i.test(out.text));
     assert.ok(/refill/i.test(out.text));
     assert.ok(/Auction shadow/i.test(out.text));
+    assert.ok(/Axia quality/i.test(out.text));
     assert.ok(/no score mutation/i.test(out.text));
     assert.equal(out.evidence[0]?.kind, "heuristic");
   });

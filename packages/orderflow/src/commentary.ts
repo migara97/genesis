@@ -1,13 +1,20 @@
-import type { AuctionShadowSnapshot, EvidenceTag, TradingSignal } from "@of/shared";
+import type {
+  AuctionShadowSnapshot,
+  AxiaQualityShadowSnapshot,
+  EvidenceTag,
+  TradingSignal,
+} from "@of/shared";
 import type { IcebergRefillSignal } from "./icebergRefill.js";
 import type { LeaderLaggerReport } from "./leaderLagger.js";
 import { formatAuctionShadowSummary } from "./auctionModel.js";
+import { formatAxiaQualitySummary } from "./axiaQualityShadow.js";
 
 export interface CommentaryInput {
   signal?: TradingSignal | null;
   iceberg?: IcebergRefillSignal | null;
   leaderLagger?: LeaderLaggerReport | null;
   auctionShadow?: AuctionShadowSnapshot | null;
+  axiaQuality?: AxiaQualityShadowSnapshot | null;
   lastPrice?: number | null;
 }
 
@@ -71,6 +78,10 @@ export function buildCommentary(input: CommentaryInput): CommentaryResult {
 
   if (input.auctionShadow) {
     parts.push(formatAuctionShadowSummary(input.auctionShadow));
+  }
+
+  if (input.axiaQuality) {
+    parts.push(formatAxiaQualitySummary(input.axiaQuality));
   }
 
   return {

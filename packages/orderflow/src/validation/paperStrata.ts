@@ -1,6 +1,24 @@
-import type { Candle, MarketRegimeTag, MarketStructureState, PaperSetupClass } from "@of/shared";
+import type {
+  AxiaQualityShadowSnapshot,
+  Candle,
+  MarketRegimeTag,
+  MarketStructureState,
+  PaperSetupClass,
+} from "@of/shared";
+import { axiaQualityRegimeHints } from "../axiaQualityShadow.js";
 import { detectRegime } from "../altScanner.js";
 import { tagMarketRegimes } from "./regime.js";
+
+const AXIA_REGIME_TAGS = new Set<MarketRegimeTag>([
+  "break_q_high",
+  "break_q_low",
+  "delta_eff_high",
+  "delta_eff_low",
+  "break_hang",
+  "hl_exhaustion",
+  "hl_absorption",
+  "hl_v_reversal",
+]);
 
 /** Quote-volume thresholds (USD notional approx) for liquidity strata. */
 export const LIQ_HIGH_USD = 50_000_000;
@@ -42,7 +60,8 @@ export function tagRangeContext(
 }
 
 /**
- * Full paper-open regime tag set: structure/vol + liquidity + range context.
+ * Full paper-open regime tag set: structure/vol + liquidity + range context
+ * + optional Axia-quality observational strata.
  */
 export function tagPaperRegimes(args: {
   structure?: Pick<MarketStructureState, "trend"> | null;
@@ -50,6 +69,7 @@ export function tagPaperRegimes(args: {
   quoteVolume24h?: number | null;
   changePct24h?: number | null;
   lookback?: number;
+  axiaQuality?: AxiaQualityShadowSnapshot | null;
 }): MarketRegimeTag[] {
   const tags = tagMarketRegimes({
     structure: args.structure,
@@ -60,6 +80,13 @@ export function tagPaperRegimes(args: {
   if (liq) tags.push(liq);
   const range = tagRangeContext(args.candles, args.changePct24h);
   if (range) tags.push(range);
+  if (args.axiaQuality) {
+    for (const hint of axiaQualityRegimeHints(args.axiaQuality)) {
+      if (AXIA_REGIME_TAGS.has(hint as MarketRegimeTag)) {
+        tags.push(hint as MarketRegimeTag);
+      }
+    }
+  }
   return [...new Set(tags)];
 }
 

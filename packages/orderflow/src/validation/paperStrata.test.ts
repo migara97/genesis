@@ -77,4 +77,26 @@ describe("paperStrata", () => {
     assert.ok(tags.includes("liq_high"));
     assert.ok(tags.includes("post_pump_compression"));
   });
+
+  it("tagPaperRegimes appends Axia-quality observational strata", () => {
+    const tags = tagPaperRegimes({
+      structure: { trend: "bullish" },
+      quoteVolume24h: LIQ_MID_USD,
+      axiaQuality: {
+        deltaEfficiency: 0.2,
+        breakQuality: 0.2,
+        hangBars: 5,
+        hangDetected: true,
+        highLowFormation: "absorption",
+        absorptionPersistence: 0.8,
+        notes: [],
+        evidence: [],
+        mutatesScores: false,
+      },
+    });
+    assert.ok(tags.includes("break_q_low"));
+    assert.ok(tags.includes("delta_eff_low"));
+    assert.ok(tags.includes("break_hang"));
+    assert.ok(tags.includes("hl_absorption"));
+  });
 });

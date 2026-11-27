@@ -157,6 +157,27 @@ export interface AuctionShadowSnapshot {
   mutatesScores: false;
 }
 
+/**
+ * Phase 13 Axia Actual-vs-Expected quality shadow — observational only.
+ * Never used as a confirmation gate or score input.
+ */
+export interface AxiaQualityShadowSnapshot {
+  /** 0..1 — price travel per aggressor imbalance (low ⇒ absorb-like). */
+  deltaEfficiency: number;
+  /** 0..1 — break follow-through vs hang/absorb risk. */
+  breakQuality: number;
+  /** Coarse bars since break while still in broken/retesting. */
+  hangBars: number;
+  hangDetected: boolean;
+  highLowFormation: "exhaustion" | "absorption" | "v_reversal" | "other" | "unknown";
+  /** 0..1 — multi-bar absorb-like persistence. */
+  absorptionPersistence: number;
+  notes: string[];
+  evidence: EvidenceTag[];
+  /** Always false — shadow never mutates signal scores. */
+  mutatesScores: false;
+}
+
 export interface MicrostructureSnapshot {
   iceberg?: IcebergRefillHint;
   leaderLagger?: {
@@ -167,6 +188,8 @@ export interface MicrostructureSnapshot {
   };
   /** R4 Fabio-style AMT shadow tags (observational only). */
   auctionShadow?: AuctionShadowSnapshot;
+  /** Phase 13 Axia quality tags (observational only). */
+  axiaQuality?: AxiaQualityShadowSnapshot;
   commentary?: {
     text: string;
     source: "template";
@@ -460,6 +483,15 @@ export type MarketRegimeTag =
   | "liq_high"
   | "liq_mid"
   | "liq_low"
+  /** Phase 13 Axia-quality strata (observational tags on paper open). */
+  | "break_q_high"
+  | "break_q_low"
+  | "delta_eff_high"
+  | "delta_eff_low"
+  | "break_hang"
+  | "hl_exhaustion"
+  | "hl_absorption"
+  | "hl_v_reversal"
   | "unknown";
 
 /** Phase F paper setup identity for stratified validation. */
@@ -521,6 +553,15 @@ export interface PaperTradeSnapshot {
       aggressionScore: number;
       followThrough: string;
       failedAuction: string;
+    };
+    /** Phase 13 Axia quality slice frozen at paper open (observational). */
+    axiaQuality?: {
+      deltaEfficiency: number;
+      breakQuality: number;
+      hangBars: number;
+      hangDetected: boolean;
+      highLowFormation: string;
+      absorptionPersistence: number;
     };
   };
 }

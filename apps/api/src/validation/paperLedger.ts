@@ -135,6 +135,7 @@ export function syncPaperTradeFromLifecycle(args: {
     (next.lifecycle === "CONFIRMED" || next.lifecycle === "ACTIVE") && !existing;
   if (opening) {
     const setupClass = deriveSetupClass(next.confirmations);
+    const axiaSlice = args.ofSnapshot?.axiaQuality;
     const regimes = tagPaperRegimes({
       structure: args.structureTrend
         ? { trend: args.structureTrend as "bullish" | "bearish" | "range" }
@@ -142,6 +143,24 @@ export function syncPaperTradeFromLifecycle(args: {
       candles: args.candles as never,
       quoteVolume24h: args.quoteVolume24h ?? args.ofSnapshot?.quoteVolume24h,
       changePct24h: args.changePct24h,
+      axiaQuality: axiaSlice
+        ? {
+            deltaEfficiency: axiaSlice.deltaEfficiency,
+            breakQuality: axiaSlice.breakQuality,
+            hangBars: axiaSlice.hangBars,
+            hangDetected: axiaSlice.hangDetected,
+            highLowFormation: axiaSlice.highLowFormation as
+              | "exhaustion"
+              | "absorption"
+              | "v_reversal"
+              | "other"
+              | "unknown",
+            absorptionPersistence: axiaSlice.absorptionPersistence,
+            notes: [],
+            evidence: [],
+            mutatesScores: false,
+          }
+        : null,
     });
     const ofSnapshot: PaperTradeSnapshot["ofSnapshot"] = {
       ...args.ofSnapshot,
