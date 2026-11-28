@@ -222,7 +222,7 @@ describe("evaluateSignalNotifications", () => {
     updateNotificationPrefs({ telegramEnabled: false });
   });
 
-  it("does Telegram SIGNAL_EXPIRED when entry plan is present", () => {
+  it("does not Telegram SIGNAL_EXPIRED even when entry plan is present", () => {
     updateNotificationPrefs({ telegramEnabled: true, inAppEnabled: true, tpSlEnabled: true });
     const setupId = `filled-expire-${Date.now()}`;
     evaluateSignalNotifications({
@@ -231,7 +231,68 @@ describe("evaluateSignalNotifications", () => {
       price: 101,
       exchange: config.exchange,
     });
-    assert.equal(hasOutboxEvent(setupId, "SIGNAL_EXPIRED", "telegram"), true);
+    assert.equal(hasOutboxEvent(setupId, "SIGNAL_EXPIRED", "telegram"), false);
+    updateNotificationPrefs({ telegramEnabled: false });
+  });
+
+  it("Telegrams only ENTRY CONFIRMED (HQ_BUY), not approaching or TP/SL", () => {
+    updateNotificationPrefs({
+      telegramEnabled: true,
+      inAppEnabled: true,
+      approachingEnabled: true,
+      tpSlEnabled: true,
+      entryConfirmEnabled: true,
+    });
+    const setupId = `tg-confirm-only-${Date.now()}`;
+
+    evaluateSignalNotifications({
+      previous: base({
+        setupId,
+        lifecycle: "WATCHING",
+        direction: "WAIT",
+        entryGrade: "WAIT",
+      }),
+      next: base({
+        setupId,
+        lifecycle: "PENDING_CONFIRM",
+        direction: "WAIT",
+        entryGrade: "WAIT",
+        confirmations: ["ob_bullish_zone", "structure_bullish"],
+        score: {
+          longScore: 4,
+          shortScore: 0,
+          neutralScore: 0,
+          independentFamilies: ["structure"],
+          factors: [],
+          modelNote: "test",
+        },
+      }),
+      price: 100,
+      exchange: config.exchange,
+    });
+    assert.equal(hasOutboxEvent(setupId, "ENTRY_ZONE_APPROACHING", "telegram"), false);
+
+    evaluateSignalNotifications({
+      previous: base({
+        setupId,
+        lifecycle: "PENDING_CONFIRM",
+        direction: "WAIT",
+        entryGrade: "WAIT",
+      }),
+      next: base({ setupId, lifecycle: "CONFIRMED", direction: "LONG", entryGrade: "A+" }),
+      price: 100,
+      exchange: config.exchange,
+    });
+    assert.equal(hasOutboxEvent(setupId, "HQ_BUY", "telegram"), true);
+
+    evaluateSignalNotifications({
+      previous: base({ setupId, lifecycle: "ACTIVE", entryGrade: "A+" }),
+      next: base({ setupId, lifecycle: "HIT_TP", entryGrade: "A+" }),
+      price: 102,
+      exchange: config.exchange,
+    });
+    assert.equal(hasOutboxEvent(setupId, "TAKE_PROFIT_REACHED", "telegram"), false);
+
     updateNotificationPrefs({ telegramEnabled: false });
   });
 

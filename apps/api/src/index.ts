@@ -128,6 +128,8 @@ app.get("/api/mode", async () => ({
   mode: executionService.getMode(),
   defaultMode: "PAPER",
   liveRequiresConfirmation: true,
+  liveExchange: "binance",
+  exchangeOkForLive: config.exchange === "binance",
 }));
 
 app.post("/api/mode", async (req, reply) => {
@@ -137,8 +139,8 @@ app.post("/api/mode", async (req, reply) => {
   });
   const body = schema.parse(req.body);
   try {
-    const mode = executionService.setMode(body.mode, body.confirmLiveTrading ?? false);
-    return { mode };
+    const mode = await executionService.setMode(body.mode, body.confirmLiveTrading ?? false);
+    return { mode, risk: executionService.getRisk() };
   } catch (err) {
     return reply.code(400).send({ error: (err as Error).message });
   }

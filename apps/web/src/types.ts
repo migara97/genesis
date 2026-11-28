@@ -540,6 +540,8 @@ export interface OrderRecord {
   quantity: number;
   filledQuantity: number;
   avgFillPrice?: number;
+  stopPrice?: number;
+  exchangeOrderId?: string;
   status: string;
   fees: number;
   rejectReason?: string;

@@ -18,6 +18,14 @@ import { marketHub } from "./marketHub.js";
 
 const FEE_BPS = 4; // 0.04% taker assumption for paper
 
+/** Binance USD-M linear symbols look like BTCUSDT — not OKX BTC-USDT-SWAP. */
+export function isBinanceLinearSymbol(symbol: string): boolean {
+  const s = symbol.toUpperCase().trim();
+  if (!s || s.includes("-") || s.includes("_") || s.includes("/")) return false;
+  if (s.includes("SWAP")) return false;
+  return /^[A-Z0-9]{5,25}$/.test(s);
+}
+
 export class ExecutionService {
   private mode: ExecutionMode = config.executionMode === "LIVE" ? "PAPER" : config.executionMode;
   private liveConfirmed = false;
@@ -52,10 +60,15 @@ export class ExecutionService {
     return this.getRisk();
   }
 
-  setMode(mode: ExecutionMode, confirmLiveTrading = false): ExecutionMode {
+  async setMode(mode: ExecutionMode, confirmLiveTrading = false): Promise<ExecutionMode> {
     if (mode === "LIVE") {
       if (!confirmLiveTrading) {
         throw new Error("LIVE mode requires confirmLiveTrading=true");
+      }
+      if (config.exchange !== "binance") {
+        throw new Error(
+          `LIVE mode requires EXCHANGE=binance (current: ${config.exchange}). OKX/Bybit are market-data only.`,
+        );
       }
       const creds = resolveBinanceCredentials();
       if (!creds.apiKey || !creds.apiSecret) {
@@ -63,6 +76,31 @@ export class ExecutionService {
           "LIVE mode requires Binance keys via encrypted secrets store or BINANCE_API_KEY/SECRET env",
         );
       }
+
+      const trading = new BinanceFuturesTradingAdapter({
+        apiKey: creds.apiKey,
+        apiSecret: creds.apiSecret,
+      });
+      let syncedEquity: number | undefined;
+      try {
+        const balances = await trading.getBalance();
+        const usdt = balances.find((b) => b.asset === "USDT");
+        if (usdt && Number.isFinite(usdt.free) && usdt.free > 0) {
+          syncedEquity = usdt.free;
+        }
+      } catch (err) {
+        throw new Error(
+          `LIVE mode could not read Binance balance: ${(err as Error).message}`,
+        );
+      }
+
+      // Small-size go-live defaults: conservative (0.25% · A+) + single position.
+      this.setRisk({
+        sizingProfile: "conservative",
+        maxOpenPositions: 1,
+        ...(syncedEquity != null ? { accountEquity: syncedEquity } : {}),
+      });
+
       this.liveConfirmed = true;
     } else {
       this.liveConfirmed = false;
@@ -72,7 +110,10 @@ export class ExecutionService {
     appendLiveAudit({
       action: "mode",
       mode,
-      reason: mode === "LIVE" ? "LIVE enabled with confirmation" : `Switched to ${mode}`,
+      reason:
+        mode === "LIVE"
+          ? `LIVE enabled with confirmation; equity=${this.risk.accountEquity}; profile=conservative`
+          : `Switched to ${mode}`,
     });
     return this.mode;
   }
@@ -109,6 +150,25 @@ export class ExecutionService {
     }
     if (this.mode === "LIVE" && !request.confirmLiveTrading && !this.liveConfirmed) {
       return this.reject(request, "Live trading not confirmed");
+    }
+
+    if (this.mode === "LIVE") {
+      if (config.exchange !== "binance") {
+        return this.reject(
+          request,
+          `LIVE orders require EXCHANGE=binance (current: ${config.exchange})`,
+        );
+      }
+      if (!isBinanceLinearSymbol(request.symbol)) {
+        return this.reject(
+          request,
+          `LIVE symbol must be Binance-style (e.g. BTCUSDT), got ${request.symbol}`,
+        );
+      }
+      const creds = resolveBinanceCredentials();
+      if (!creds.apiKey || !creds.apiSecret) {
+        return this.reject(request, "LIVE credentials missing");
+      }
     }
 
     const snap = marketHub.getSnapshot(request.symbol);
@@ -160,7 +220,11 @@ export class ExecutionService {
       return this.fillPaper(order, entry);
     }
 
-    // LIVE
+    // LIVE — entry then reduce-only protective stop (required).
+    if (order.stopPrice == null || order.stopPrice <= 0) {
+      return this.reject(request, "LIVE orders require a stop-loss");
+    }
+
     const creds = resolveBinanceCredentials();
     const trading = new BinanceFuturesTradingAdapter({
       apiKey: creds.apiKey,
@@ -175,30 +239,79 @@ export class ExecutionService {
         return this.reject(request, "Insufficient available balance (pre-trade check)");
       }
 
+      // Keep risk equity honest vs wallet when placing.
+      if (Number.isFinite(usdt.free) && usdt.free > 0) {
+        const drift =
+          Math.abs(usdt.free - this.risk.accountEquity) /
+          Math.max(this.risk.accountEquity, usdt.free, 1);
+        if (drift > 0.25) {
+          this.setRisk({ accountEquity: usdt.free });
+        }
+      }
+
       const result =
         request.type === "LIMIT" && request.price != null
           ? await trading.placeLimitOrder(order.symbol, order.side, quantity, request.price)
           : await trading.placeMarketOrder(order.symbol, order.side, quantity);
 
       order.exchangeOrderId = result.orderId;
-      order.status = "FILLED";
       order.filledQuantity = quantity;
       order.avgFillPrice = entry;
       order.fees = (entry * quantity * FEE_BPS) / 10_000;
       order.updatedAt = Date.now();
-      this.applyFillToPosition(order);
-      saveOrder(order);
-      appendLiveAudit({
-        action: "place",
-        mode: "LIVE",
-        symbol: order.symbol,
-        side: order.side,
-        type: order.type,
-        quantity: order.quantity,
-        status: order.status,
-        exchangeOrderId: order.exchangeOrderId,
-      });
-      return order;
+
+      const stopSide = order.side === "BUY" ? "SELL" : "BUY";
+      try {
+        const stopResult = await trading.placeStopMarketOrder(
+          order.symbol,
+          stopSide,
+          quantity,
+          order.stopPrice,
+        );
+        order.status = "FILLED";
+        this.applyFillToPosition(order);
+        saveOrder(order);
+        appendLiveAudit({
+          action: "place",
+          mode: "LIVE",
+          symbol: order.symbol,
+          side: order.side,
+          type: order.type,
+          quantity: order.quantity,
+          status: order.status,
+          exchangeOrderId: order.exchangeOrderId,
+          reason: `entry=${result.orderId}; stop=${stopResult.orderId}@${order.stopPrice}`,
+        });
+        return order;
+      } catch (stopErr) {
+        // Entry is live without protection — flatten immediately.
+        let flattenNote = "flatten not attempted";
+        try {
+          const flat = await trading.placeMarketOrder(order.symbol, stopSide, quantity, {
+            reduceOnly: true,
+          });
+          flattenNote = `flattened orderId=${flat.orderId}`;
+        } catch (flatErr) {
+          flattenNote = `FLATTEN FAILED: ${(flatErr as Error).message}`;
+        }
+        const reason = `STOP_FAILED after entry ${result.orderId}: ${(stopErr as Error).message}; ${flattenNote}`;
+        appendLiveAudit({
+          action: "reject",
+          mode: "LIVE",
+          symbol: order.symbol,
+          side: order.side,
+          type: order.type,
+          quantity: order.quantity,
+          status: "REJECTED",
+          exchangeOrderId: order.exchangeOrderId,
+          reason,
+        });
+        order.status = "REJECTED";
+        order.rejectReason = reason;
+        order.updatedAt = Date.now();
+        saveOrder(order);
+        return order;
+      }
     } catch (err) {
       return this.reject(request, (err as Error).message);
     }

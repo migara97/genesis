@@ -147,35 +147,61 @@ export default function App() {
     try {
       if (next === "LIVE") {
         const ok = window.confirm(
-          "Enable LIVE trading? This can place real orders with server-stored API keys. Paper remains recommended.",
+          "Enable LIVE trading?\n\nReal Binance Futures orders. Each click places entry + reduce-only stop.\nRisk switches to conservative (0.25% · A+ only · max 1 position).\nPaper remains safer until Phase 8 is claimable.",
         );
         if (!ok) return;
-        await setMode("LIVE", true);
+        const res = await setMode("LIVE", true);
+        if (res.risk) setRisk(res.risk);
       } else {
         await setMode(next, false);
       }
       setModeState(next);
       setStatusMsg(`Mode set to ${next}`);
+      await refreshPortfolio();
     } catch (e) {
       setStatusMsg(String(e));
     }
   };
 
+  const effectiveStop = stop ? Number(stop) : snap?.signal?.stopLoss;
+  const liveStopPreview =
+    effectiveStop != null && Number.isFinite(effectiveStop) ? effectiveStop : null;
+  const liveReadyHint =
+    mode === "LIVE"
+      ? snap?.signal?.entryGrade === "A+" && snap?.signal?.lifecycle === "CONFIRMED"
+        ? null
+        : "LIVE: wait for A+ CONFIRMED before clicking Buy/Sell (conservative profile)."
+      : null;
+
   const submit = async (side: "BUY" | "SELL") => {
     if (!snap) return;
+    if (mode === "LIVE") {
+      if (liveStopPreview == null) {
+        setStatusMsg("LIVE blocked: set a stop loss (or wait for signal stop).");
+        return;
+      }
+      const ok = window.confirm(
+        `Place LIVE ${side} on ${snap.symbol}?\n\nStop (reduce-only) will be sent at ${liveStopPreview}.\nOnly click if Signal Engine is A+ CONFIRMED and side matches.`,
+      );
+      if (!ok) return;
+    }
     try {
       const order = await placeOrder({
         symbol: snap.symbol,
         side,
         type: "MARKET",
         quantity: Number(qty),
-        stopPrice: stop ? Number(stop) : snap.signal?.stopLoss,
+        stopPrice: liveStopPreview ?? undefined,
         confirmLiveTrading: mode === "LIVE",
       });
       setStatusMsg(
         order.status === "REJECTED"
           ? `Rejected: ${order.rejectReason}`
-          : `Order ${order.status} ${order.side} ${order.quantity} @ ${order.avgFillPrice ?? "-"}`,
+          : `Order ${order.status} ${order.side} ${order.quantity} @ ${order.avgFillPrice ?? "-"}${
+              mode === "LIVE" && order.stopPrice != null
+                ? ` · stop ${order.stopPrice}`
+                : ""
+            }`,
       );
       await refreshPortfolio();
     } catch (e) {
@@ -207,7 +233,9 @@ export default function App() {
               ? "reconnecting"
               : "down"}
         </span>
-        <span className="pill warn">Default: PAPER</span>
+        <span className={`pill ${mode === "LIVE" ? "off" : "warn"}`}>
+          {mode === "LIVE" ? "LIVE — real money" : "Default: PAPER"}
+        </span>
         <span className="pill">{symbol || "select a market"}</span>
         <span className="pill">{snap?.primaryInterval ?? primaryInterval} primary</span>
         <span className="price">{fmt(snap?.lastPrice)}</span>
@@ -352,6 +380,31 @@ export default function App() {
           <div className="panel-body">
             <div className="desk-block">
               <div className="desk-kicker">Order ticket</div>
+              {mode === "LIVE" ? (
+                <p className="disclaimer" style={{ marginBottom: 8 }}>
+                  LIVE: one click = Binance entry + reduce-only stop. Use Kill Switch if anything
+                  looks wrong. Match signal side only.
+                </p>
+              ) : null}
+              {liveReadyHint ? (
+                <div className="signal-short" style={{ marginBottom: 8 }}>
+                  {liveReadyHint}
+                </div>
+              ) : null}
+              {mode === "LIVE" ? (
+                <div className="metric-grid" style={{ marginBottom: 8 }}>
+                  <div className="metric">
+                    <span>Stop to send</span>
+                    <strong className="sell">{liveStopPreview != null ? fmt(liveStopPreview) : "—"}</strong>
+                  </div>
+                  <div className="metric">
+                    <span>Signal</span>
+                    <strong>
+                      {snap?.signal?.entryGrade ?? "WAIT"} · {snap?.signal?.lifecycle ?? "WATCHING"}
+                    </strong>
+                  </div>
+                </div>
+              ) : null}
               <div className="ticket">
                 <label className="field">
                   <span>Quantity</span>
@@ -359,7 +412,11 @@ export default function App() {
                 </label>
                 <label className="field">
                   <span>Stop loss</span>
-              <input value={stop} onChange={(e) => setStop(e.target.value)} placeholder="stop" />
+              <input
+                value={stop}
+                onChange={(e) => setStop(e.target.value)}
+                placeholder={snap?.signal?.stopLoss != null ? String(snap.signal.stopLoss) : "stop"}
+              />
                 </label>
             </div>
               <div className="trade-actions">
@@ -475,8 +532,9 @@ export default function App() {
               </div>
             </div>
             <p className="disclaimer">
-              Paper is default. Live requires explicit confirmation and server-side API keys.
-              Secrets never ship to the browser.
+              Paper is default. LIVE needs confirmation, Binance keys, and sends a protective stop
+              with every entry. Prefer Settings secrets over plaintext env. Kill Switch disables
+              trading immediately.
             </p>
           </div>
         </section>
@@ -2037,8 +2095,8 @@ function SettingsPanel({ onClose }: { onClose: () => void }) {
 
         <div className="desk-kicker">Signal notifications (PAPER)</div>
         <p className="disclaimer">
-          High-quality BUY/SELL alerts fire only on existing A+ CONFIRMED setups. Favorite the
-          symbol first. No automatic real-money orders.
+          In-app can show approaching / TP / SL. Telegram sends only when STATUS is ENTRY
+          CONFIRMED (A+ setup). Favorite the symbol first. No automatic real-money orders.
         </p>
         {prefs ? (
           <div className="chip-row" style={{ flexWrap: "wrap", gap: 8 }}>

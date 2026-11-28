@@ -242,14 +242,33 @@ export function evaluateSignalNotifications(args: {
       }
     }
 
-    // Never Telegram empty ENTRY DETAILS (Entry/SL/TP/R:R all "-").
-    if (prefs.telegramEnabled && hasEntryPlan(args.next)) {
+    // Telegram: ONLY STATUS "ENTRY CONFIRMED" (HQ_BUY / HQ_SELL / ENTRY_CONFIRMED).
+    // Never send approaching / TP / SL / invalidated / expired on Telegram.
+    if (
+      prefs.telegramEnabled &&
+      hasEntryPlan(args.next) &&
+      (eventType === "HQ_BUY" ||
+        eventType === "HQ_SELL" ||
+        eventType === "ENTRY_CONFIRMED")
+    ) {
+      const tg = formatSignalNotification(args.next, {
+        exchange,
+        primaryInterval: args.primaryInterval ?? "5m",
+        price: args.price,
+        // Force STATUS: ENTRY CONFIRMED header/body for Telegram.
+        eventType: "ENTRY_CONFIRMED",
+      });
       enqueueNotification({
         setupId: args.next.setupId,
         symbol,
         eventType,
         channel: "telegram",
-        payload,
+        payload: {
+          ...payload,
+          title: tg.title,
+          message: tg.message,
+          eventType: "ENTRY_CONFIRMED",
+        },
       });
     }
   }

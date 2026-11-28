@@ -27,12 +27,24 @@ export interface ExchangeMarketDataAdapter {
 
 export interface ExchangeTradingAdapter {
   readonly id: string;
-  placeMarketOrder(symbol: string, side: "BUY" | "SELL", quantity: number): Promise<{ orderId: string }>;
+  placeMarketOrder(
+    symbol: string,
+    side: "BUY" | "SELL",
+    quantity: number,
+    opts?: { reduceOnly?: boolean },
+  ): Promise<{ orderId: string }>;
   placeLimitOrder(
     symbol: string,
     side: "BUY" | "SELL",
     quantity: number,
     price: number,
+  ): Promise<{ orderId: string }>;
+  /** Protective stop — opposite side, reduce-only STOP_MARKET. */
+  placeStopMarketOrder(
+    symbol: string,
+    side: "BUY" | "SELL",
+    quantity: number,
+    stopPrice: number,
   ): Promise<{ orderId: string }>;
   cancelOrder(symbol: string, orderId: string): Promise<void>;
   getBalance(): Promise<{ asset: string; free: number; locked: number }[]>;

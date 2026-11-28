@@ -35,7 +35,10 @@ export async function fetchMode(): Promise<{ mode: ExecutionMode }> {
   return json(await fetch("/api/mode"));
 }
 
-export async function setMode(mode: ExecutionMode, confirmLiveTrading = false) {
+export async function setMode(
+  mode: ExecutionMode,
+  confirmLiveTrading = false,
+): Promise<{ mode: ExecutionMode; risk?: RiskConfig }> {
   return json(
     await fetch("/api/mode", {
       method: "POST",
@@ -54,13 +57,31 @@ export async function placeOrder(body: {
   stopPrice?: number;
   confirmLiveTrading?: boolean;
 }): Promise<OrderRecord> {
-  return json(
-    await fetch("/api/orders", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    }),
-  );
+  const res = await fetch("/api/orders", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const text = await res.text();
+  let parsed: unknown = null;
+  try {
+    parsed = text ? JSON.parse(text) : null;
+  } catch {
+    parsed = null;
+  }
+  // API returns 400 + OrderRecord for risk/LIVE rejects — surface rejectReason in UI.
+  if (
+    parsed &&
+    typeof parsed === "object" &&
+    "status" in parsed &&
+    (parsed as OrderRecord).status === "REJECTED"
+  ) {
+    return parsed as OrderRecord;
+  }
+  if (!res.ok) {
+    throw new Error(text || res.statusText);
+  }
+  return parsed as OrderRecord;
 }
 
 export async function emergencyShutdown() {

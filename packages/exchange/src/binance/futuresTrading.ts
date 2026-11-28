@@ -17,6 +17,7 @@ export class BinanceFuturesTradingAdapter implements ExchangeTradingAdapter {
     symbol: string,
     side: "BUY" | "SELL",
     quantity: number,
+    opts?: { reduceOnly?: boolean },
   ): Promise<{ orderId: string }> {
     const params: Record<string, string> = {
       symbol: symbol.toUpperCase(),
@@ -25,6 +26,7 @@ export class BinanceFuturesTradingAdapter implements ExchangeTradingAdapter {
       quantity: String(quantity),
       timestamp: String(Date.now()),
     };
+    if (opts?.reduceOnly) params.reduceOnly = "true";
     const data = (await this.signedRequest("POST", "/fapi/v1/order", params)) as {
       orderId: string | number;
     };
@@ -44,6 +46,28 @@ export class BinanceFuturesTradingAdapter implements ExchangeTradingAdapter {
       timeInForce: "GTC",
       quantity: String(quantity),
       price: String(price),
+      timestamp: String(Date.now()),
+    };
+    const data = (await this.signedRequest("POST", "/fapi/v1/order", params)) as {
+      orderId: string | number;
+    };
+    return { orderId: String(data.orderId) };
+  }
+
+  async placeStopMarketOrder(
+    symbol: string,
+    side: "BUY" | "SELL",
+    quantity: number,
+    stopPrice: number,
+  ): Promise<{ orderId: string }> {
+    const params: Record<string, string> = {
+      symbol: symbol.toUpperCase(),
+      side,
+      type: "STOP_MARKET",
+      stopPrice: String(stopPrice),
+      quantity: String(quantity),
+      reduceOnly: "true",
+      workingType: "CONTRACT_PRICE",
       timestamp: String(Date.now()),
     };
     const data = (await this.signedRequest("POST", "/fapi/v1/order", params)) as {
