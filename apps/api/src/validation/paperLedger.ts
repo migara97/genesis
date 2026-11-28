@@ -407,6 +407,130 @@ export function syncPaperTradeFromLifecycle(args: {
   );
 }
 
+/** Symbols with OPEN paper rows — used to keep TP/SL updates across focus rotation. */
+export function listOpenPaperTradeSymbols(): string[] {
+  const rows = db
+    .prepare(`SELECT DISTINCT symbol FROM paper_trades WHERE outcome = 'OPEN'`)
+    .all() as { symbol: string }[];
+  return rows.map((r) => r.symbol);
+}
+
+/**
+ * Price-only maintenance for OPEN paper trades when the symbol is not OF-focused.
+ * Updates MFE/MAE and closes on stop / TP1 / activeMaxAge timeout.
+ * Does not call generateSignal — measurement integrity only.
+ */
+export function updateOpenPaperTradesByPrice(args: {
+  symbol: string;
+  price: number;
+  now?: number;
+  activeMaxAgeMs?: number;
+}): number {
+  const now = args.now ?? Date.now();
+  const activeMaxAgeMs = args.activeMaxAgeMs ?? 30 * 60_000;
+  const rows = db
+    .prepare(
+      `SELECT setup_id, direction, entry, stop_loss, take_profit, opened_at, mfe, mae, remaining_frac, scale_fills, gross_pnl, fees, funding, net_pnl
+       FROM paper_trades WHERE symbol = ? AND outcome = 'OPEN'`,
+    )
+    .all(args.symbol.toUpperCase()) as {
+    setup_id: string;
+    direction: string;
+    entry: number;
+    stop_loss: number;
+    take_profit: string;
+    opened_at: number;
+    mfe: number | null;
+    mae: number | null;
+    remaining_frac: number | null;
+    scale_fills: string | null;
+    gross_pnl: number | null;
+    fees: number | null;
+    funding: number | null;
+    net_pnl: number | null;
+  }[];
+
+  let closed = 0;
+  for (const row of rows) {
+    const side = row.direction as "LONG" | "SHORT";
+    const mfe = updateExtrema(side, row.entry, args.price, row.mfe, "mfe");
+    const mae = updateExtrema(side, row.entry, args.price, row.mae, "mae");
+    db.prepare(
+      `UPDATE paper_trades SET mfe = ?, mae = ?, updated_at = ? WHERE setup_id = ? AND outcome = 'OPEN'`,
+    ).run(mfe, mae, now, row.setup_id);
+
+    let lifecycle: string | null = null;
+    if (side === "LONG" && args.price <= row.stop_loss) lifecycle = "HIT_SL";
+    else if (side === "SHORT" && args.price >= row.stop_loss) lifecycle = "HIT_SL";
+    else {
+      let tps: number[] = [];
+      try {
+        tps = JSON.parse(row.take_profit) as number[];
+      } catch {
+        tps = [];
+      }
+      const tp1 = tps[0];
+      if (tp1 != null) {
+        if (side === "LONG" && args.price >= tp1) lifecycle = "HIT_TP";
+        else if (side === "SHORT" && args.price <= tp1) lifecycle = "HIT_TP";
+      }
+    }
+    if (!lifecycle && now - row.opened_at > activeMaxAgeMs) {
+      lifecycle = "TIMEOUT";
+    }
+    if (!lifecycle) continue;
+
+    const stub: TradingSignal = {
+      id: row.setup_id,
+      setupId: row.setup_id,
+      symbol: args.symbol.toUpperCase(),
+      timestamp: now,
+      direction: side,
+      entry: row.entry,
+      stopLoss: row.stop_loss,
+      takeProfit: (() => {
+        try {
+          return JSON.parse(row.take_profit) as number[];
+        } catch {
+          return [];
+        }
+      })(),
+      confidence: 0,
+      confirmations: [],
+      reasonsFor: [],
+      reasonsAgainst: [],
+      invalidation: [],
+      orderFlowOk: false,
+      structureOk: false,
+      volumeOk: false,
+      deltaOk: false,
+      score: {
+        longScore: 0,
+        shortScore: 0,
+        neutralScore: 0,
+        independentFamilies: [],
+        factors: [],
+        modelNote: "orphan price update",
+      },
+      evidence: [],
+      entryGrade: "WAIT",
+      lifecycle: lifecycle as TradingSignal["lifecycle"],
+      lifecycleUpdatedAt: now,
+      setupOpenedAt: row.opened_at,
+      lifecycleNote: `Orphan focus price update → ${lifecycle}`,
+      tpHits: 0,
+      scaleRemainingFrac: row.remaining_frac ?? 1,
+    };
+    syncPaperTradeFromLifecycle({
+      previous: { ...stub, lifecycle: "ACTIVE", lifecycleUpdatedAt: row.opened_at },
+      next: stub,
+      price: args.price,
+    });
+    closed += 1;
+  }
+  return closed;
+}
+
 export function listPaperTrades(opts: {
   symbol?: string;
   limit?: number;

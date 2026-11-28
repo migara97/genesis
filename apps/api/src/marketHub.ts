@@ -53,7 +53,12 @@ import { evaluateAlerts } from "./alerts/store.js";
 import { getTickerStats, listMarkets } from "./markets/store.js";
 import { evaluateSignalNotifications } from "./notifications/evaluateSignalNotifications.js";
 import { recordSignalLifecycle } from "./signals/journal.js";
-import { syncPaperTradeFromLifecycle } from "./validation/paperLedger.js";
+import { recordSignalRejections } from "./signals/rejectionTelemetry.js";
+import {
+  listOpenPaperTradeSymbols,
+  syncPaperTradeFromLifecycle,
+  updateOpenPaperTradesByPrice,
+} from "./validation/paperLedger.js";
 import { archiveTradeTick } from "./validation/tapeArchive.js";
 
 /** Candle limits per TF — keep HTF lighter to limit REST load. */
@@ -70,6 +75,8 @@ const SESSION_DAY_CANDLE_LIMIT = 5;
 const MTF_REFRESH_MS = 5 * 60_000;
 /** Re-fetch primary TF klines so the desk chart / structure stay near live. */
 const PRIMARY_CANDLE_REFRESH_MS = 30_000;
+/** REST poll for OPEN paper symbols that are not currently OF-focused. */
+const ORPHAN_PAPER_POLL_MS = 60_000;
 
 function createMarketAdapter(): ExchangeMarketDataAdapter {
   return createMarketDataAdapter(config.exchange);
@@ -132,12 +139,30 @@ export class MarketHub extends EventEmitter {
   /** Phase 8: rotate OF focus across DEFAULT_SYMBOLS. */
   private rotationTimer: NodeJS.Timeout | null = null;
   private rotationIndex = 0;
+  /** Price-only maintenance for OPEN paper trades on non-focused symbols. */
+  private orphanPaperTimer: NodeJS.Timeout | null = null;
   /**
    * Desk pin from a UI subscribe. While set, Phase 8 rotation must not steal
    * focus — otherwise the UI stays on e.g. XAUUSDT (chart via REST) while the
    * server streams ETHUSDT and Footprint/CVD/VP stay empty.
    */
   private deskPinnedSymbol: string | null = null;
+  /**
+   * Coalesce rapid focus switches (multi-tab subscribe fights). Without this the
+   * exchange socket tears down every few hundred ms → perpetual "… down".
+   */
+  private focusDebounceTimer: NodeJS.Timeout | null = null;
+  private pendingFocus: {
+    symbol: string;
+    primaryInterval?: string | null;
+    source: "user" | "rotation" | "boot";
+  } | null = null;
+  /** While reconnecting the exchange adapter for a focus switch. */
+  private focusApplying = false;
+  /** Previous focused symbol — used to ignore multi-tab "revert" thrash. */
+  private previousDeskSymbol: string | null = null;
+  /** Ignore reverts to previousDeskSymbol until this time. */
+  private deskPinLockUntil = 0;
   /** Phase 12: throttle favorites alert evaluation per symbol. */
   private alertEvalAt = new Map<string, number>();
 
@@ -226,12 +251,51 @@ export class MarketHub extends EventEmitter {
     }
   }
 
+  /**
+   * Keep OPEN paper trades resolvable when focus rotation leaves their symbol.
+   * REST last-price poll → TP/SL/timeout without regenerating signals.
+   */
+  startOrphanPaperWatcher(log?: { info: (obj: object, msg: string) => void }): void {
+    if (this.orphanPaperTimer) {
+      clearInterval(this.orphanPaperTimer);
+      this.orphanPaperTimer = null;
+    }
+    log?.info({ intervalMs: ORPHAN_PAPER_POLL_MS }, "orphan paper price watcher enabled");
+    this.orphanPaperTimer = setInterval(() => {
+      void this.pollOrphanPaperTrades().catch((err) => this.emit("error", err));
+    }, ORPHAN_PAPER_POLL_MS);
+  }
+
+  stopOrphanPaperWatcher(): void {
+    if (this.orphanPaperTimer) {
+      clearInterval(this.orphanPaperTimer);
+      this.orphanPaperTimer = null;
+    }
+  }
+
+  private async pollOrphanPaperTrades(): Promise<void> {
+    const focused = [...this.states.keys()];
+    const openSymbols = listOpenPaperTradeSymbols().filter((s) => !focused.includes(s));
+    for (const symbol of openSymbols) {
+      try {
+        const candles = await this.adapter.fetchKlines(symbol, "1m", 1);
+        const price = candles[candles.length - 1]?.close;
+        if (price != null && price > 0) {
+          updateOpenPaperTradesByPrice({ symbol, price });
+        }
+      } catch (err) {
+        this.emit("error", err);
+      }
+    }
+  }
+
   setTickSize(symbol: string, tickSize: number): void {
     if (tickSize > 0) this.tickSizes.set(symbol.toUpperCase(), tickSize);
   }
 
   /**
    * Stream order-flow for one symbol. Other catalog rows stay on the ticker feed.
+   * Rapid user subscribes are debounced so multi-tab fights do not thrash the exchange WS.
    */
   async focus(
     symbol: string,
@@ -241,7 +305,6 @@ export class MarketHub extends EventEmitter {
     const normalized = symbol.trim().toUpperCase();
     if (!normalized) return;
     const source = opts?.source ?? "user";
-    if (source === "user") this.deskPinnedSymbol = normalized;
     // boot / rotation must not override an active desk pin
     if (
       (source === "rotation" || source === "boot") &&
@@ -250,6 +313,26 @@ export class MarketHub extends EventEmitter {
     ) {
       return;
     }
+    // Multi-tab thrash: Tab A pins XAU, Tab B still asserts old BTC — ignore the revert.
+    // Intentional new symbols (e.g. ETH) are still allowed.
+    if (
+      source === "user" &&
+      this.deskPinnedSymbol &&
+      normalized !== this.deskPinnedSymbol &&
+      (this.focusApplying ||
+        (normalized === this.previousDeskSymbol && Date.now() < this.deskPinLockUntil))
+    ) {
+      this.publish(this.deskPinnedSymbol);
+      return;
+    }
+    if (source === "user") {
+      if (this.deskPinnedSymbol && this.deskPinnedSymbol !== normalized) {
+        this.previousDeskSymbol = this.deskPinnedSymbol;
+        this.deskPinLockUntil = Date.now() + 12_000;
+      }
+      this.deskPinnedSymbol = normalized;
+    }
+
     const nextPrimary =
       primaryInterval != null ? resolvePrimaryInterval(primaryInterval) : this.primaryInterval;
     const keys = [...this.states.keys()];
@@ -259,6 +342,11 @@ export class MarketHub extends EventEmitter {
 
     // Duplicate WS subscribe / hello must NOT reconnect — that reloads footprint + churns Signal Engine.
     if (sameSymbol && samePrimary && (this.started || this.connecting)) {
+      this.pendingFocus = null;
+      if (this.focusDebounceTimer) {
+        clearTimeout(this.focusDebounceTimer);
+        this.focusDebounceTimer = null;
+      }
       this.publish(normalized);
       return;
     }
@@ -278,39 +366,81 @@ export class MarketHub extends EventEmitter {
       return;
     }
 
-    if (primaryInterval != null) this.setPrimaryInterval(primaryInterval);
-    const rotIdx = config.symbols.indexOf(normalized);
-    if (rotIdx >= 0) this.rotationIndex = rotIdx;
-    const gen = ++this.generation;
-    if (this.retryTimer) {
-      clearTimeout(this.retryTimer);
-      this.retryTimer = null;
+    // Boot connects immediately; user/rotation coalesce so BTC↔XAU tab fights settle.
+    if (source === "boot") {
+      await this.applyFocus(normalized, primaryInterval);
+      return;
     }
-    this.started = false;
-    this.connecting = false;
+    this.pendingFocus = { symbol: normalized, primaryInterval, source };
+    if (this.focusDebounceTimer) clearTimeout(this.focusDebounceTimer);
+    this.focusDebounceTimer = setTimeout(() => {
+      this.focusDebounceTimer = null;
+      const pending = this.pendingFocus;
+      this.pendingFocus = null;
+      if (!pending) return;
+      void this.applyFocus(pending.symbol, pending.primaryInterval);
+    }, 1_000);
+  }
+
+  /** Actually tear down / reconnect the exchange adapter for a symbol. */
+  private async applyFocus(
+    normalized: string,
+    primaryInterval?: string | null,
+  ): Promise<void> {
+    this.focusApplying = true;
     try {
-      await this.adapter.disconnect();
-    } catch {
-      // The next connect replaces the socket.
-    }
-    if (gen !== this.generation) return;
-    for (const key of [...this.states.keys()]) {
-      if (key !== normalized) {
-        const stale = this.states.get(key);
-        if (stale?.mtfRefreshTimer) clearInterval(stale.mtfRefreshTimer);
-        if (stale?.primaryCandleTimer) clearInterval(stale.primaryCandleTimer);
-        if (stale?.footprintCloseTimer) clearTimeout(stale.footprintCloseTimer);
-        this.states.delete(key);
+      if (primaryInterval != null) this.setPrimaryInterval(primaryInterval);
+      const rotIdx = config.symbols.indexOf(normalized);
+      if (rotIdx >= 0) this.rotationIndex = rotIdx;
+      const gen = ++this.generation;
+      if (this.retryTimer) {
+        clearTimeout(this.retryTimer);
+        this.retryTimer = null;
       }
-    }
-    for (const key of [...this.snapshotTimers.keys()]) {
-      if (key !== normalized) {
-        const timer = this.snapshotTimers.get(key);
-        if (timer) clearTimeout(timer);
-        this.snapshotTimers.delete(key);
+      this.started = false;
+      this.connecting = false;
+      try {
+        await this.adapter.disconnect({ quiet: true });
+      } catch {
+        // The next connect replaces the socket.
       }
+      if (gen !== this.generation) return;
+      for (const key of [...this.states.keys()]) {
+        if (key !== normalized) {
+          const stale = this.states.get(key);
+          if (stale?.mtfRefreshTimer) clearInterval(stale.mtfRefreshTimer);
+          if (stale?.primaryCandleTimer) clearInterval(stale.primaryCandleTimer);
+          if (stale?.footprintCloseTimer) clearTimeout(stale.footprintCloseTimer);
+          this.states.delete(key);
+        }
+      }
+      for (const key of [...this.snapshotTimers.keys()]) {
+        if (key !== normalized) {
+          const timer = this.snapshotTimers.get(key);
+          if (timer) clearTimeout(timer);
+          this.snapshotTimers.delete(key);
+        }
+      }
+      this.bootstrapSymbols([normalized]);
+      // Keep desk health green during the brief reconnect gap.
+      for (const state of this.states.values()) {
+        state.health = {
+          ...state.health,
+          connected: true,
+          lastError: `Switching to ${normalized}…`,
+        };
+      }
+      this.emit("health", {
+        exchange: this.adapter.id,
+        connected: true,
+        reconnectAttempts: 0,
+        symbols: [normalized],
+        lastError: `Switching to ${normalized}…`,
+      });
+      await this.start([normalized], gen);
+    } finally {
+      this.focusApplying = false;
     }
-    await this.start([normalized], gen);
   }
 
   /**
@@ -916,6 +1046,11 @@ export class MarketHub extends EventEmitter {
       breakRetest: state.breakRetest,
     });
     state.signal = applySignalLifecycle(previous, candidate, state.lastPrice, now);
+    try {
+      recordSignalRejections(state.signal);
+    } catch {
+      // Telemetry must never break the signal path.
+    }
     // Refresh observational shadows before paper freeze (no score mutation).
     state.auctionShadow = computeAuctionShadow({
       symbol,

@@ -16,7 +16,8 @@ export interface MarketDataHandlers {
 export interface ExchangeMarketDataAdapter {
   readonly id: string;
   connect(symbols: string[], handlers: MarketDataHandlers): Promise<void>;
-  disconnect(): Promise<void>;
+  /** quiet: skip connected=false health emit (used during intentional symbol focus switch). */
+  disconnect(opts?: { quiet?: boolean }): Promise<void>;
   getHealth(): ConnectionHealth;
   fetchKlines(symbol: string, interval: string, limit?: number): Promise<Candle[]>;
   fetchOrderBookSnapshot(symbol: string, limit?: number): Promise<OrderBookSnapshot>;

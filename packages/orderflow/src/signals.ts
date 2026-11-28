@@ -95,6 +95,11 @@ export interface SignalEngineConfig {
   icebergVetoProximityPct: number;
   /** Reject entries within this pct of a recent swing high (LONG) / low (SHORT). */
   swingProximityPct: number;
+  /**
+   * Only the N most recent opposing swings participate in the proximity veto.
+   * Avoids false WAITs from stale historical swings still in the structure window.
+   */
+  swingProximityRecentCount: number;
   /** Require nearest opposing S/R at least this many R from entry. */
   minRoomToRunR: number;
   /** Buffer beyond protective swing/S/R when placing structure stop. */
@@ -124,7 +129,11 @@ export const DEFAULT_SIGNAL_CONFIG: SignalEngineConfig = {
   },
   levelProximityPct: 0.0015,
   domRequiresTradeDelta: true,
-  mtfMinHigherAgree: 2,
+  /**
+   * ≥1 directional HTF agreeing (4h or 1h). Conflict veto still blocks when the
+   * majority of directional HTFs oppose the primary — ranging HTF no longer denies.
+   */
+  mtfMinHigherAgree: 1,
   sweepMaxAgeMs: 4 * 60 * 60_000,
   entryQuality: "a_plus",
   minIndependent: 2,
@@ -141,6 +150,7 @@ export const DEFAULT_SIGNAL_CONFIG: SignalEngineConfig = {
   icebergVetoMinConfidence: 0.4,
   icebergVetoProximityPct: 0.0015,
   swingProximityPct: 0.001,
+  swingProximityRecentCount: 3,
   /** Live-quality floor — require ≥1.5R to opposing structure. */
   minRoomToRunR: 1.5,
   stopBufferPct: 0.001,
@@ -933,31 +943,30 @@ export function generateSignal(
     }
 
     if (direction !== "WAIT" && structure && config.swingProximityPct > 0 && lastPrice > 0) {
+      const recentN = Math.max(1, config.swingProximityRecentCount ?? 3);
       const swings = structure.swings ?? [];
       if (direction === "SHORT") {
-        const hit = swings.some(
-          (s) =>
-            s.kind === "low" &&
-            Math.abs(s.price - lastPrice) / lastPrice <= config.swingProximityPct,
+        const recentLows = swings.filter((s) => s.kind === "low").slice(-recentN);
+        const hit = recentLows.some(
+          (s) => Math.abs(s.price - lastPrice) / lastPrice <= config.swingProximityPct,
         );
         if (hit) {
           direction = demote(
             "entry_at_swing_low",
             "structure",
-            `Entry within ${(config.swingProximityPct * 100).toFixed(2)}% of a swing low — no SHORT.`,
+            `Entry within ${(config.swingProximityPct * 100).toFixed(2)}% of a recent swing low — no SHORT.`,
           );
         }
       } else if (direction === "LONG") {
-        const hit = swings.some(
-          (s) =>
-            s.kind === "high" &&
-            Math.abs(s.price - lastPrice) / lastPrice <= config.swingProximityPct,
+        const recentHighs = swings.filter((s) => s.kind === "high").slice(-recentN);
+        const hit = recentHighs.some(
+          (s) => Math.abs(s.price - lastPrice) / lastPrice <= config.swingProximityPct,
         );
         if (hit) {
           direction = demote(
             "entry_at_swing_high",
             "structure",
-            `Entry within ${(config.swingProximityPct * 100).toFixed(2)}% of a swing high — no LONG.`,
+            `Entry within ${(config.swingProximityPct * 100).toFixed(2)}% of a recent swing high — no LONG.`,
           );
         }
       }

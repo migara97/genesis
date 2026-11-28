@@ -82,7 +82,7 @@ export class BinanceFuturesMarketDataAdapter implements ExchangeMarketDataAdapte
     await this.openSockets();
   }
 
-  async disconnect(): Promise<void> {
+  async disconnect(opts?: { quiet?: boolean }): Promise<void> {
     this.connId += 1;
     this.shouldRun = false;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
@@ -93,7 +93,8 @@ export class BinanceFuturesMarketDataAdapter implements ExchangeMarketDataAdapte
     this.marketOpen = false;
     this.publicOpen = false;
     this.health = { ...this.health, connected: false };
-    this.emitHealth();
+    // Focus switches reconnect immediately — don't flash the desk pill to "down".
+    if (!opts?.quiet) this.emitHealth();
   }
 
   getHealth(): ConnectionHealth {

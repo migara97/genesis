@@ -21,6 +21,7 @@ import {
 } from "./markets/store.js";
 import { getScannerSnapshot, startAltScanner } from "./scanner/runner.js";
 import { computeJournalMetrics, listSignalSetups } from "./signals/journal.js";
+import { getRejectionHistogram } from "./signals/rejectionTelemetry.js";
 import {
   createAlert,
   deleteAlert,
@@ -375,6 +376,21 @@ app.get("/api/validation/paper-trades", async (req) => {
   };
 });
 
+/** Observational WAIT rejection histogram (does not change generateSignal). */
+app.get("/api/validation/rejection-histogram", async (req) => {
+  const q = req.query as { hours?: string; limit?: string };
+  const hours = q.hours ? Number(q.hours) : 24;
+  const limit = q.limit ? Number(q.limit) : 50;
+  const sinceMs = Date.now() - (Number.isFinite(hours) ? hours : 24) * 60 * 60_000;
+  return {
+    sinceMs,
+    reasons: getRejectionHistogram({
+      sinceMs,
+      limit: Number.isFinite(limit) ? limit : 50,
+    }),
+  };
+});
+
 /** Phase 8: reject runtime signal-weight overrides while the freeze is on. */
 app.post("/api/validation/signal-config", async (_req, reply) => {
   if (config.validationLockConfig) {
@@ -527,6 +543,7 @@ try {
   );
   void marketHub.focus(initialSymbol, null, { source: "boot" });
   marketHub.startFocusRotation(app.log);
+  marketHub.startOrphanPaperWatcher(app.log);
   startMarketSync(app.log);
   startAltScanner(app.log);
   startNotificationDispatcher(2_000);

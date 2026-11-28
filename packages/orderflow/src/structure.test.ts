@@ -1,10 +1,12 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import type { Candle } from "@of/shared";
+import type { SwingPoint } from "@of/shared";
 import {
   PRIMARY_INTERVAL,
   analyzeMarketStructure,
   buildMultiTimeframeContext,
+  detectBosChoch,
   midIntervalForPrimary,
   resolvePrimaryInterval,
   softIntervalForPrimary,
@@ -65,6 +67,61 @@ describe("buildMultiTimeframeContext", () => {
     assert.equal(mtf.conflictWithPrimary, false);
     assert.equal(mtf.higherTfBullish, 2);
     assert.equal(mtf.primaryInterval, "5m");
+  });
+});
+
+describe("detectBosChoch sequential", () => {
+  function swing(
+    kind: "high" | "low",
+    price: number,
+    type: SwingPoint["type"],
+    timestamp: number,
+  ): SwingPoint {
+    return { kind, price, type, timestamp };
+  }
+
+  it("establishes bullish trend on HH + HL without dead CHoCH", () => {
+    const swings: SwingPoint[] = [
+      swing("low", 90, "HL", 1),
+      swing("high", 100, "HH", 2),
+      swing("low", 92, "HL", 3),
+      swing("high", 110, "HH", 4),
+    ];
+    const s = detectBosChoch(swings);
+    assert.equal(s.trend, "bullish");
+    assert.equal(s.lastBos?.direction, "bullish");
+    assert.equal(s.lastBos?.price, 110);
+    assert.equal(s.lastChoch, undefined);
+  });
+
+  it("fires bearish CHoCH after bullish structure when a later LL prints", () => {
+    const swings: SwingPoint[] = [
+      swing("low", 90, "HL", 1),
+      swing("high", 100, "HH", 2),
+      swing("low", 92, "HL", 3),
+      swing("high", 110, "HH", 4),
+      swing("low", 88, "LL", 5), // breaks prior HL → bearish CHoCH
+    ];
+    const s = detectBosChoch(swings);
+    assert.ok(s.lastChoch, "expected CHoCH after LL against bullish trend");
+    assert.equal(s.lastChoch?.direction, "bearish");
+    assert.equal(s.lastChoch?.price, 88);
+    assert.equal(s.trend, "bearish");
+  });
+
+  it("fires bullish CHoCH after bearish structure when a later HH prints", () => {
+    const swings: SwingPoint[] = [
+      swing("high", 110, "HH", 1),
+      swing("low", 100, "LL", 2),
+      swing("high", 105, "LH", 3),
+      swing("low", 90, "LL", 4),
+      swing("high", 112, "HH", 5), // breaks prior LH → bullish CHoCH
+    ];
+    const s = detectBosChoch(swings);
+    assert.ok(s.lastChoch, "expected CHoCH after HH against bearish trend");
+    assert.equal(s.lastChoch?.direction, "bullish");
+    assert.equal(s.lastChoch?.price, 112);
+    assert.equal(s.trend, "bullish");
   });
 });
 

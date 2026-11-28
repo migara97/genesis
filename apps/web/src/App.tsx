@@ -65,9 +65,22 @@ export default function App() {
     setPrimaryInterval,
   } = useMarketSocket();
   const symbols = Object.keys(snapshots);
-  const [symbol, setSymbol] = useState("");
+  const [symbol, setSymbol] = useState(() => {
+    try {
+      const v = localStorage.getItem("genesis.deskSymbol");
+      return v && /^[A-Z0-9._-]{3,40}$/i.test(v) ? v.toUpperCase() : "";
+    } catch {
+      return "";
+    }
+  });
   const [primaryInterval, setPrimaryLocal] = useState<"5m" | "15m">(readStoredPrimaryInterval());
-  const [pinned, setPinned] = useState(false);
+  const [pinned, setPinned] = useState(() => {
+    try {
+      return Boolean(localStorage.getItem("genesis.deskSymbol"));
+    } catch {
+      return false;
+    }
+  });
   const [mode, setModeState] = useState<ExecutionMode>("PAPER");
   const [risk, setRisk] = useState<RiskConfig | null>(null);
   const [positions, setPositions] = useState<Position[]>([]);
@@ -90,10 +103,24 @@ export default function App() {
   }, [symbol, snap?.symbol]);
 
   const selectSymbol = (next: string) => {
+    const sym = next.toUpperCase();
     setPinned(true);
-    setSymbol(next);
-    subscribe(next, primaryInterval);
+    setSymbol(sym);
+    subscribe(sym, primaryInterval);
   };
+
+  // Keep desk symbol aligned when another tab picks XAU/BTC/etc.
+  useEffect(() => {
+    const onStorage = (ev: StorageEvent) => {
+      if (ev.key !== "genesis.deskSymbol" || !ev.newValue) return;
+      const next = ev.newValue.toUpperCase();
+      if (!/^[A-Z0-9._-]{3,40}$/.test(next)) return;
+      setPinned(true);
+      setSymbol(next);
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, []);
 
   const onPrimaryChange = (next: "5m" | "15m") => {
     setPrimaryLocal(next);
@@ -163,9 +190,22 @@ export default function App() {
         <span className={`pill ${connected ? "on" : "off"}`}>
           {connected ? "WS connected" : "WS disconnected"}
         </span>
-        <span className={`pill ${health?.connected ? "on" : "off"}`}>
-          {health?.exchange ?? "binance-futures"}{" "}
-          {health?.connected ? "live" : "down"}
+        <span
+          className={`pill ${
+            health?.connected
+              ? "on"
+              : /connect|reconnect/i.test(health?.lastError ?? "")
+                ? "warn"
+                : "off"
+          }`}
+          title={health?.lastError ?? undefined}
+        >
+          {health?.exchange ?? "exchange"}{" "}
+          {health?.connected
+            ? "live"
+            : /connect|reconnect/i.test(health?.lastError ?? "")
+              ? "reconnecting"
+              : "down"}
         </span>
         <span className="pill warn">Default: PAPER</span>
         <span className="pill">{symbol || "select a market"}</span>

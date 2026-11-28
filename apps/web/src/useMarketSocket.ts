@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { ConnectionHealth, MarketSnapshot } from "./types";
 
 const PRIMARY_KEY = "genesis.primaryInterval";
+const DESK_SYMBOL_KEY = "genesis.deskSymbol";
 const PING_MS = 15_000;
 
 export function readStoredPrimaryInterval(): "5m" | "15m" {
@@ -17,6 +18,23 @@ export function readStoredPrimaryInterval(): "5m" | "15m" {
 export function storePrimaryInterval(interval: "5m" | "15m"): void {
   try {
     localStorage.setItem(PRIMARY_KEY, interval);
+  } catch {
+    // ignore
+  }
+}
+
+export function readStoredDeskSymbol(): string | null {
+  try {
+    const v = localStorage.getItem(DESK_SYMBOL_KEY);
+    return v && /^[A-Z0-9._-]{3,40}$/i.test(v) ? v.toUpperCase() : null;
+  } catch {
+    return null;
+  }
+}
+
+export function storeDeskSymbol(symbol: string): void {
+  try {
+    localStorage.setItem(DESK_SYMBOL_KEY, symbol.toUpperCase());
   } catch {
     // ignore
   }
@@ -45,7 +63,7 @@ export function useMarketSocket() {
   const [alerts, setAlerts] = useState<InAppAlert[]>([]);
   const retryRef = useRef(0);
   const wsRef = useRef<WebSocket | null>(null);
-  const symbolRef = useRef<string | null>(null);
+  const symbolRef = useRef<string | null>(readStoredDeskSymbol());
   const primaryRef = useRef<"5m" | "15m">(readStoredPrimaryInterval());
   const pingRef = useRef<number | undefined>(undefined);
 
@@ -126,15 +144,18 @@ export function useMarketSocket() {
             const map: Record<string, MarketSnapshot> = {};
             for (const s of payload.snapshots ?? []) map[s.symbol] = s;
             setSnapshots(map);
+            // Prefer persisted desk symbol (XAU etc.) so reconnects don't jump back to BTC.
             const first =
               symbolRef.current ??
+              readStoredDeskSymbol() ??
               payload.snapshots?.[0]?.symbol ??
               payload.symbols?.[0] ??
               null;
-            if (first && !symbolRef.current) {
+            if (first) {
               symbolRef.current = first;
+              storeDeskSymbol(first);
+              sendSubscribe(ws!);
             }
-            if (first) sendSubscribe(ws!);
             if (payload.snapshots?.[0]?.health) setHealth(payload.snapshots[0].health);
           } else if (msg.type === "snapshot") {
             const snap = msg.payload as MarketSnapshot;
@@ -142,20 +163,8 @@ export function useMarketSocket() {
             setSnapshots((prev) => ({ ...prev, [snap.symbol]: snap }));
             setHealth(snap.health);
             setError(null);
-            // If the server is streaming a different pair than the desk pin, re-assert subscribe.
-            if (
-              symbolRef.current &&
-              snap.symbol !== symbolRef.current &&
-              wsRef.current?.readyState === WebSocket.OPEN
-            ) {
-              wsRef.current.send(
-                JSON.stringify({
-                  type: "subscribe",
-                  symbol: symbolRef.current,
-                  primaryInterval: primaryRef.current,
-                }),
-              );
-            }
+            // Do NOT re-assert subscribe on mismatch — other tabs sharing this API
+            // would fight (BTC↔XAU) and flash okx-swap live/down forever.
           } else if (msg.type === "health") {
             setHealth(msg.payload as ConnectionHealth);
           } else if (msg.type === "pong") {
@@ -204,22 +213,34 @@ export function useMarketSocket() {
       }
     };
 
+    const onStorage = (ev: StorageEvent) => {
+      if (ev.key !== DESK_SYMBOL_KEY || !ev.newValue) return;
+      const next = ev.newValue.toUpperCase();
+      if (!/^[A-Z0-9._-]{3,40}$/.test(next)) return;
+      // Follow the tab that clicked — do not subscribe again (avoids focus fight).
+      symbolRef.current = next;
+    };
+
     connect();
     document.addEventListener("visibilitychange", onVisible);
     window.addEventListener("online", onVisible);
+    window.addEventListener("storage", onStorage);
 
     return () => {
       closed = true;
       clearPing();
       document.removeEventListener("visibilitychange", onVisible);
       window.removeEventListener("online", onVisible);
+      window.removeEventListener("storage", onStorage);
       if (timer) window.clearTimeout(timer);
       ws?.close();
     };
   }, []);
 
   const subscribe = (symbol: string, primaryInterval?: "5m" | "15m") => {
-    symbolRef.current = symbol;
+    const next = symbol.toUpperCase();
+    symbolRef.current = next;
+    storeDeskSymbol(next);
     if (primaryInterval) {
       primaryRef.current = primaryInterval;
       storePrimaryInterval(primaryInterval);
@@ -228,7 +249,7 @@ export function useMarketSocket() {
       wsRef.current.send(
         JSON.stringify({
           type: "subscribe",
-          symbol,
+          symbol: next,
           primaryInterval: primaryRef.current,
         }),
       );

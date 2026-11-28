@@ -16,6 +16,12 @@ export interface LifecycleConfig {
   activeMaxAgeMs: number;
   /** Hold terminal states to suppress duplicate re-alerts. */
   terminalHoldMs: number;
+  /**
+   * Require directional candidate to remain valid this long before CONFIRMED.
+   * Suppresses flicker CONFIRMED→INVALIDATED that pollutes the paper sample.
+   * 0 = legacy immediate confirm.
+   */
+  confirmDwellMs: number;
   /** Phase 12 partial scale-out. */
   scaleOut?: ScaleOutConfig;
 }
@@ -24,6 +30,8 @@ export const DEFAULT_LIFECYCLE_CONFIG: LifecycleConfig = {
   pendingMaxAgeMs: 5 * 60_000,
   activeMaxAgeMs: 30 * 60_000,
   terminalHoldMs: 60_000,
+  /** 15s dwell — long enough to filter tick flicker, short enough for OF entries. */
+  confirmDwellMs: 15_000,
   scaleOut: {
     enabled: true,
     fractions: [0.5, 0.3, 0.2],
@@ -52,6 +60,16 @@ export function applySignalLifecycle(
   config: LifecycleConfig = DEFAULT_LIFECYCLE_CONFIG,
 ): TradingSignal {
   if (!previous) {
+    // Directional first print: hold in PENDING_CONFIRM until confirmDwellMs elapses.
+    if (candidate.direction !== "WAIT" && config.confirmDwellMs > 0) {
+      return withLifecycle(
+        candidate,
+        "PENDING_CONFIRM",
+        now,
+        now,
+        `Awaiting ${Math.round(config.confirmDwellMs / 1000)}s confirmation dwell.`,
+      );
+    }
     return withLifecycle(candidate, candidate.lifecycle, now, candidate.setupOpenedAt);
   }
 
@@ -129,9 +147,11 @@ function continueSetup(
   const openedAt = previous.setupOpenedAt || previous.lifecycleUpdatedAt || now;
   const age = now - openedAt;
 
-  // Directional setup lost confirmations → invalidate.
+  // Directional setup (incl. dwell PENDING_CONFIRM) lost confirmations → invalidate.
   if (
-    (previous.lifecycle === "CONFIRMED" || previous.lifecycle === "ACTIVE") &&
+    (previous.lifecycle === "CONFIRMED" ||
+      previous.lifecycle === "ACTIVE" ||
+      (previous.lifecycle === "PENDING_CONFIRM" && previous.direction !== "WAIT")) &&
     candidate.direction === "WAIT"
   ) {
     return withLifecycle(
@@ -163,6 +183,27 @@ function continueSetup(
       candidate.lifecycle,
       previous.lifecycle === candidate.lifecycle ? previous.lifecycleUpdatedAt : now,
       openedAt,
+    );
+  }
+
+  // Directional dwell: stay PENDING_CONFIRM until confirmDwellMs, then CONFIRMED.
+  // (candidate.direction is already narrowed to LONG|SHORT after WAIT early-returns above.)
+  if (previous.lifecycle === "PENDING_CONFIRM" && config.confirmDwellMs > 0) {
+    if (age < config.confirmDwellMs) {
+      return withLifecycle(
+        mergeDirectional(previous, candidate, openedAt),
+        "PENDING_CONFIRM",
+        previous.lifecycleUpdatedAt,
+        openedAt,
+        `Awaiting confirmation dwell (${Math.round((config.confirmDwellMs - age) / 1000)}s left).`,
+      );
+    }
+    return withLifecycle(
+      mergeDirectional(previous, candidate, openedAt),
+      "CONFIRMED",
+      now,
+      openedAt,
+      "Confirmation dwell passed.",
     );
   }
 

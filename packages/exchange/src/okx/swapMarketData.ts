@@ -34,15 +34,19 @@ export class OkxSwapMarketDataAdapter implements ExchangeMarketDataAdapter {
     await this.openSocket();
   }
 
-  async disconnect(): Promise<void> {
+  async disconnect(opts?: { quiet?: boolean }): Promise<void> {
     this.connId += 1;
     this.shouldRun = false;
-    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
     if (this.pingTimer) clearInterval(this.pingTimer);
     this.ws?.close();
     this.ws = null;
     this.health = { ...this.health, connected: false };
-    this.emitHealth();
+    // Focus switches reconnect immediately — don't flash the desk pill to "down".
+    if (!opts?.quiet) this.emitHealth();
   }
 
   getHealth(): ConnectionHealth {
@@ -156,12 +160,30 @@ export class OkxSwapMarketDataAdapter implements ExchangeMarketDataAdapter {
   }
 
   private scheduleReconnect(): void {
+    if (!this.shouldRun) return;
+    if (this.reconnectTimer) return;
     this.reconnectAttempts += 1;
     const delay = Math.min(30_000, 1000 * 2 ** Math.min(this.reconnectAttempts, 5));
-    this.health = { ...this.health, reconnectAttempts: this.reconnectAttempts };
+    this.health = {
+      ...this.health,
+      connected: false,
+      reconnectAttempts: this.reconnectAttempts,
+      lastError: `Reconnecting OKX WS (attempt ${this.reconnectAttempts})…`,
+    };
     this.emitHealth();
     this.reconnectTimer = setTimeout(() => {
-      void this.openSocket().catch((err) => this.handlers?.onError?.(err as Error));
+      this.reconnectTimer = null;
+      if (!this.shouldRun) return;
+      void this.openSocket().catch((err) => {
+        this.handlers?.onError?.(err as Error);
+        this.health = {
+          ...this.health,
+          lastError: (err as Error).message,
+          connected: false,
+        };
+        this.emitHealth();
+        this.scheduleReconnect();
+      });
     }, delay);
   }
 

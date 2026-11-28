@@ -34,7 +34,7 @@ export class BybitLinearMarketDataAdapter implements ExchangeMarketDataAdapter {
     await this.openSocket();
   }
 
-  async disconnect(): Promise<void> {
+  async disconnect(opts?: { quiet?: boolean }): Promise<void> {
     this.connId += 1;
     this.shouldRun = false;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
@@ -42,7 +42,8 @@ export class BybitLinearMarketDataAdapter implements ExchangeMarketDataAdapter {
     this.ws?.close();
     this.ws = null;
     this.health = { ...this.health, connected: false };
-    this.emitHealth();
+    // Focus switches reconnect immediately — don't flash the desk pill to "down".
+    if (!opts?.quiet) this.emitHealth();
   }
 
   getHealth(): ConnectionHealth {

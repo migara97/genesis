@@ -139,7 +139,13 @@ function classifySwings(
   return out;
 }
 
-function detectBosChoch(swings: SwingPoint[]): Pick<
+/**
+ * Sequential BOS/CHoCH from classified swings.
+ * Walks chronologically so a later LL after an established HH/HL bullish trend
+ * can fire bearish CHoCH (the prior last-two-pair check made that unreachable).
+ * After CHoCH, trend flips to the new direction (aligned CHoCH path).
+ */
+export function detectBosChoch(swings: SwingPoint[]): Pick<
   MarketStructureState,
   "lastBos" | "lastChoch" | "trend"
 > {
@@ -147,36 +153,49 @@ function detectBosChoch(swings: SwingPoint[]): Pick<
   let lastBos: MarketStructureState["lastBos"];
   let lastChoch: MarketStructureState["lastChoch"];
 
-  const highs = swings.filter((s) => s.kind === "high");
-  const lows = swings.filter((s) => s.kind === "low");
-  if (highs.length >= 2 && lows.length >= 2) {
-    const h1 = highs[highs.length - 2]!;
-    const h2 = highs[highs.length - 1]!;
-    const l1 = lows[lows.length - 2]!;
-    const l2 = lows[lows.length - 1]!;
-    if (h2.price > h1.price && l2.price > l1.price) {
-      trend = "bullish";
-      lastBos = { direction: "bullish", price: h2.price, timestamp: h2.timestamp };
-    } else if (h2.price < h1.price && l2.price < l1.price) {
-      trend = "bearish";
-      lastBos = { direction: "bearish", price: l2.price, timestamp: l2.timestamp };
-    }
-  }
+  let prevHigh: SwingPoint | undefined;
+  let lastHigh: SwingPoint | undefined;
+  let prevLow: SwingPoint | undefined;
+  let lastLow: SwingPoint | undefined;
 
-  // CHoCH: break against prior trend using last opposite swing
-  if (trend === "bullish" && lows.length >= 1) {
-    const lastLow = lows[lows.length - 1]!;
-    const prevLow = lows[lows.length - 2];
-    if (prevLow && lastLow.price < prevLow.price) {
-      lastChoch = { direction: "bearish", price: lastLow.price, timestamp: lastLow.timestamp };
-      trend = "range";
-    }
-  } else if (trend === "bearish" && highs.length >= 1) {
-    const lastHigh = highs[highs.length - 1]!;
-    const prevHigh = highs[highs.length - 2];
-    if (prevHigh && lastHigh.price > prevHigh.price) {
-      lastChoch = { direction: "bullish", price: lastHigh.price, timestamp: lastHigh.timestamp };
-      trend = "range";
+  for (const s of swings) {
+    if (s.kind === "high") {
+      prevHigh = lastHigh;
+      lastHigh = s;
+      if (!prevHigh) continue;
+
+      if (s.price > prevHigh.price) {
+        // Higher high
+        if (trend === "bearish") {
+          lastChoch = { direction: "bullish", price: s.price, timestamp: s.timestamp };
+          trend = "bullish";
+        } else if (trend === "bullish") {
+          lastBos = { direction: "bullish", price: s.price, timestamp: s.timestamp };
+        } else if (lastLow && prevLow && lastLow.price > prevLow.price) {
+          // HH + prior HL → establish bullish with BOS at the HH
+          trend = "bullish";
+          lastBos = { direction: "bullish", price: s.price, timestamp: s.timestamp };
+        }
+      }
+      // LH while ranging stays range; LH in bullish without LL is pullback (no event)
+    } else {
+      prevLow = lastLow;
+      lastLow = s;
+      if (!prevLow) continue;
+
+      if (s.price < prevLow.price) {
+        // Lower low
+        if (trend === "bullish") {
+          lastChoch = { direction: "bearish", price: s.price, timestamp: s.timestamp };
+          trend = "bearish";
+        } else if (trend === "bearish") {
+          lastBos = { direction: "bearish", price: s.price, timestamp: s.timestamp };
+        } else if (lastHigh && prevHigh && lastHigh.price < prevHigh.price) {
+          // LL + prior LH → establish bearish with BOS at the LL
+          trend = "bearish";
+          lastBos = { direction: "bearish", price: s.price, timestamp: s.timestamp };
+        }
+      }
     }
   }
 

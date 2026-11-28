@@ -438,6 +438,87 @@ describe("generateSignal", () => {
     assert.ok((signal.entryQualityNotes ?? []).some((n) => /Location OK/i.test(n)));
   });
 
+  it("A+ permits LONG when one HTF is bullish and the other is range (mtfMinHigherAgree=1)", () => {
+    assert.equal(DEFAULT_SIGNAL_CONFIG.mtfMinHigherAgree, 1);
+    const signal = generateSignal({
+      ...baseLongInput(),
+      lastPrice: 95.2,
+      mtf: {
+        primaryInterval: "5m",
+        frames: [
+          { interval: "4h", trend: "bullish" },
+          { interval: "1h", trend: "range" },
+          { interval: "5m", trend: "bullish" },
+        ],
+        higherTfBullish: 1,
+        higherTfBearish: 0,
+        higherTfRange: 1,
+        conflictWithPrimary: false,
+        updatedAt: 1,
+      },
+      zones: {
+        symbol: "BTCUSDT",
+        orderBlocks: [
+          {
+            id: "ob1",
+            direction: "bullish",
+            low: 94.5,
+            high: 95.5,
+            createdAt: 1,
+            invalidated: false,
+            definition: "Bullish OB",
+          },
+        ],
+        fairValueGaps: [],
+        recentSweeps: [],
+        evidence: [],
+        updatedAt: 1,
+      },
+    });
+    assert.equal(signal.direction, "LONG");
+    assert.equal(signal.entryGrade, "A+");
+  });
+
+  it("A+ still blocks when HTF majority conflicts with primary", () => {
+    const signal = generateSignal({
+      ...baseLongInput(),
+      lastPrice: 95.2,
+      mtf: {
+        primaryInterval: "5m",
+        frames: [
+          { interval: "4h", trend: "bearish" },
+          { interval: "1h", trend: "bearish" },
+          { interval: "5m", trend: "bullish" },
+        ],
+        higherTfBullish: 0,
+        higherTfBearish: 2,
+        higherTfRange: 0,
+        conflictWithPrimary: true,
+        updatedAt: 1,
+      },
+      zones: {
+        symbol: "BTCUSDT",
+        orderBlocks: [
+          {
+            id: "ob1",
+            direction: "bullish",
+            low: 94.5,
+            high: 95.5,
+            createdAt: 1,
+            invalidated: false,
+            definition: "Bullish OB",
+          },
+        ],
+        fairValueGaps: [],
+        recentSweeps: [],
+        evidence: [],
+        updatedAt: 1,
+      },
+    });
+    assert.equal(signal.direction, "WAIT");
+    assert.ok((signal.entryQualityNotes ?? []).some((n) => /HTF conflicts/i.test(n)));
+  });
+
   it("readiness gate WAITs without footprint/VP even with strong SHORT scores", () => {
     const input = baseLongInput();
     input.lastPrice = 68888.05;
@@ -600,7 +681,64 @@ describe("generateSignal", () => {
     );
   });
 
-  it("WAITs SHORT when entry sits on a swing low", () => {
+  it("ignores stale swing highs beyond swingProximityRecentCount for LONG", () => {
+    const aPlusReady = {
+      ...baseLongInput(),
+      lastPrice: 95.2,
+      mtf: {
+        primaryInterval: "5m",
+        frames: [
+          { interval: "4h", trend: "bullish" },
+          { interval: "1h", trend: "bullish" },
+          { interval: "5m", trend: "bullish" },
+        ],
+        higherTfBullish: 2,
+        higherTfBearish: 0,
+        higherTfRange: 0,
+        conflictWithPrimary: false,
+        updatedAt: 1,
+      },
+      zones: {
+        symbol: "BTCUSDT",
+        orderBlocks: [
+          {
+            id: "ob1",
+            direction: "bullish" as const,
+            low: 94.5,
+            high: 95.5,
+            createdAt: 1,
+            invalidated: false,
+            definition: "Bullish OB",
+          },
+        ],
+        fairValueGaps: [],
+        recentSweeps: [],
+        evidence: [],
+        updatedAt: 1,
+      },
+      structure: {
+        ...baseLongInput().structure!,
+        swings: [
+          { price: 95.2, timestamp: 1, kind: "high" as const, type: "HH" as const }, // stale — outside recent N
+          { price: 80, timestamp: 2, kind: "low" as const, type: "HL" as const },
+          { price: 88, timestamp: 3, kind: "high" as const, type: "LH" as const },
+          { price: 81, timestamp: 4, kind: "low" as const, type: "HL" as const },
+          { price: 86, timestamp: 5, kind: "high" as const, type: "LH" as const },
+          { price: 82, timestamp: 6, kind: "low" as const, type: "HL" as const },
+          { price: 90, timestamp: 7, kind: "high" as const, type: "HH" as const }, // recent, far from entry
+        ],
+      },
+    };
+    const signal = generateSignal(aPlusReady);
+    assert.equal(signal.direction, "LONG");
+    assert.equal(signal.entryGrade, "A+");
+    assert.equal(
+      signal.score.factors.some((f) => f.id === "entry_at_swing_high"),
+      false,
+    );
+  });
+
+  it("WAITs SHORT when entry sits on a recent swing low", () => {
     const input = baseLongInput();
     input.lastPrice = 68888.05;
     input.structure = {
